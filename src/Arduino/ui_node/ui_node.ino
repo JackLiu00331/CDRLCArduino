@@ -55,6 +55,7 @@ void requestEvent() {
 void setup() {
   Serial.begin(9600);
   dht.begin();
+  delay(2000);   // DHT11 needs ≥1 s after power-on; 2 s is safer
   Wire.begin(SLAVE_ADDR);
   Wire.onRequest(requestEvent);
   Serial.println(F("[ENV] DHT11 node ready at 0x08"));
@@ -80,7 +81,11 @@ void loop() {
     hInt = (uint8_t)(h + 0.5f);     // round to nearest integer %
   }
 
-  Serial.print(F("[DHT] "));
-  Serial.print(t, 1); Serial.print(F("C  "));
-  Serial.print(h, 0); Serial.println('%');
+  if (isnan(t) || isnan(h)) {
+    Serial.println(F("[DHT] read failed – check wiring & pull-up resistor"));
+  } else {
+    Serial.print(F("[DHT] "));
+    Serial.print(t, 1); Serial.print(F("C  "));
+    Serial.print(h, 0); Serial.println('%');
+  }
 }

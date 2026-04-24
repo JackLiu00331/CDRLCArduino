@@ -152,6 +152,13 @@ DispState dispState = DISP_NORMAL;
 unsigned long lastTouchTime = 0;
 const unsigned long TOUCH_COOLDOWN = 500UL; // ms between accepted touches
 
+// ── Slot data cache ───────────────────────────────────────────────────────────
+// Avoids a network round-trip on every button press.
+// cachedSlots[dateIdx][slotIdx] = 8-char status string ("10010100")
+// slotCached[dateIdx][slotIdx]  = true once that slot has been fetched.
+char cachedSlots[5][8][9];
+bool slotCached[5][8];     // zero-initialised (all false) by default
+
 // ── Button debounce ───────────────────────────────────────────────────────────
 unsigned long btnTime[3] = {0, 0, 0};
 const unsigned long DEBOUNCE = 200UL;
@@ -497,45 +504,58 @@ void fetchDates()
     start = comma + 1;
   }
   dateIdx = (numDates > 1) ? 1 : 0;
+  memset(slotCached, false, sizeof(slotCached));  // date list changed → invalidate all
   Serial.print(F("[Dates] got "));
   Serial.println(numDates);
 }
 
-void fetchAndDisplay()
+// Apply a slot data string to LEDs and TFT (shared by cache-hit and network paths).
+void applySlotData(const char *data)
 {
-  if (numDates == 0)
-    return;
-
-  String resp = httpGet(String("/slot?date=") + dateList[dateIdx] + "&time=" + SLOT_PARAMS[slotIdx]);
-  if (resp.length() != 8)
-    return;
-
   uint8_t statusA = 0, statusB = 0;
   for (int i = 0; i < 8; i++)
   {
-    roomFree[i] = (resp[i] == '0'); // '0' = slot available
-    if (resp[i] == '1')
-    { // '1' = booked
-      if (i < 5)
-        statusA |= (1 << i);
-      else
-        statusB |= (1 << (i - 5));
+    roomFree[i] = (data[i] == '0');
+    if (data[i] == '1')
+    {
+      if (i < 5) statusA |= (1 << i);
+      else       statusB |= (1 << (i - 5));
     }
   }
-
   sendI2C(SLAVE_WING_A, 0x01, statusA);
   sendI2C(SLAVE_WING_B, 0x01, statusB);
-
-  // Buzzer: fire if any room transitioned from booked → free
-  if ((prevStatusA & ~statusA) || (prevStatusB & ~statusB))
-    buzzerTrigger();
+  if ((prevStatusA & ~statusA) || (prevStatusB & ~statusB)) buzzerTrigger();
   prevStatusA = statusA;
   prevStatusB = statusB;
+  if (dispState == DISP_NORMAL) drawNormalScreen();
+}
 
-  lastAutoFetch = millis();
-  if (dispState == DISP_NORMAL)
-    drawNormalScreen();
-  Serial.println(String("[Slot] ") + resp + "  " + dateList[dateIdx] + " " + SLOT_PARAMS[slotIdx]);
+void fetchAndDisplay()
+{
+  if (numDates == 0) return;
+
+  // ── Cache hit: instant display, no network call ───────────────────────────
+  if (slotCached[dateIdx][slotIdx])
+  {
+    Serial.print(F("[Cache] ")); Serial.print(dateList[dateIdx]);
+    Serial.print(' '); Serial.println(SLOT_PARAMS[slotIdx]);
+    applySlotData(cachedSlots[dateIdx][slotIdx]);
+    return;
+  }
+
+  // ── Cache miss: fetch from server, then cache ─────────────────────────────
+  String resp = httpGet(String("/slot?date=") + dateList[dateIdx] + "&time=" + SLOT_PARAMS[slotIdx]);
+  if (resp.length() != 8) return;
+
+  strncpy(cachedSlots[dateIdx][slotIdx], resp.c_str(), 8);
+  cachedSlots[dateIdx][slotIdx][8] = '\0';
+  slotCached[dateIdx][slotIdx] = true;
+
+  applySlotData(cachedSlots[dateIdx][slotIdx]);
+  lastAutoFetch = millis();   // only reset 5-min timer on real network fetch
+  Serial.print(F("[Slot] fetched ")); Serial.print(resp);
+  Serial.print(F("  ")); Serial.print(dateList[dateIdx]);
+  Serial.print(' '); Serial.println(SLOT_PARAMS[slotIdx]);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -643,6 +663,7 @@ void loop()
     pendingRefresh = true;
     refreshStart = now;
     httpGet("/refresh");
+    memset(slotCached, false, sizeof(slotCached));  // force fresh fetch for all slots
     tft.fillRect(0, 0, SCREEN_W, HEADER_H, COL_HDR_BG);
     tftCenter("Refreshing...", (HEADER_H - 16) / 2, 2, COL_DATE, COL_HDR_BG);
   }
@@ -671,8 +692,10 @@ void loop()
   }
 
   // Auto-refresh every 5 minutes
+  // Only invalidate current slot so other cached slots stay fast.
   if (now - lastAutoFetch >= AUTO_FETCH_MS)
   {
+    slotCached[dateIdx][slotIdx] = false;
     fetchAndDisplay();
   }
 }

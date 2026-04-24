@@ -76,8 +76,8 @@
 #include <LiquidCrystal.h>
 
 // ── WiFi & server ─────────────────────────────────────────────────────────────
-const char *SSID       = "YourSSID";                         // ← change
-const char *PASSWORD   = "YourPassword";                     // ← change
+const char *SSID       = "NETGEAR77";                         // ← change
+const char *PASSWORD   = "pinkbutter932";                     // ← change
 const char *SERVER_IP  = "zz-cloud.tail6b9dfa.ts.net";       // Tailscale Funnel hostname
 const int   SERVER_PORT = 443;
 
@@ -134,6 +134,13 @@ const unsigned long DHT_READ_MS = 30000UL;      // 30 seconds
 int  lcdPage = 0;
 unsigned long lastLCDPage = 0;
 const unsigned long LCD_PAGE_MS = 2500UL;        // 2.5 s per page
+
+// ── Slot data cache ───────────────────────────────────────────────────────────
+// Avoids a network round-trip on every button press.
+// cachedSlots[dateIdx][slotIdx] = 8-char status string ("10010100")
+// slotCached[dateIdx][slotIdx]  = true once that slot has been fetched.
+char cachedSlots[5][8][9];
+bool slotCached[5][8];     // zero-initialised (all false) by default
 
 // ── Button debounce ───────────────────────────────────────────────────────────
 unsigned long btnTime[3] = {0, 0, 0};
@@ -317,39 +324,53 @@ void fetchDates() {
     start = comma + 1;
   }
   dateIdx = (numDates > 1) ? 1 : 0;
+  memset(slotCached, false, sizeof(slotCached));  // date list changed → invalidate all
   Serial.print(F("[Dates] got ")); Serial.println(numDates);
+}
+
+// Apply a slot data string to LEDs and LCD (shared by cache-hit and network paths).
+void applySlotData(const char *data) {
+  uint8_t statusA = 0, statusB = 0;
+  for (int i = 0; i < 8; i++) {
+    roomFree[i] = (data[i] == '0');
+    if (data[i] == '1') {
+      if (i < 5) statusA |= (1 << i);
+      else       statusB |= (1 << (i - 5));
+    }
+  }
+  sendI2C(SLAVE_WING_A, 0x01, statusA);
+  sendI2C(SLAVE_WING_B, 0x01, statusB);
+  if ((prevStatusA & ~statusA) || (prevStatusB & ~statusB)) buzzerTrigger();
+  prevStatusA = statusA;
+  prevStatusB = statusB;
+  lcdRefresh();
 }
 
 void fetchAndDisplay() {
   if (numDates == 0) return;
 
+  // ── Cache hit: instant display, no network call ───────────────────────────
+  if (slotCached[dateIdx][slotIdx]) {
+    Serial.print(F("[Cache] ")); Serial.print(dateList[dateIdx]);
+    Serial.print(' '); Serial.println(SLOT_PARAMS[slotIdx]);
+    applySlotData(cachedSlots[dateIdx][slotIdx]);
+    return;
+  }
+
+  // ── Cache miss: fetch from server, then cache ─────────────────────────────
   String resp = httpGet(
     String("/slot?date=") + dateList[dateIdx] + "&time=" + SLOT_PARAMS[slotIdx]);
   if (resp.length() != 8) return;
 
-  uint8_t statusA = 0, statusB = 0;
-  for (int i = 0; i < 8; i++) {
-    roomFree[i] = (resp[i] == '0');  // '0' = slot available
-    if (resp[i] == '1') {            // '1' = booked
-      if (i < 5) statusA |= (1 << i);
-      else       statusB |= (1 << (i - 5));
-    }
-  }
+  strncpy(cachedSlots[dateIdx][slotIdx], resp.c_str(), 8);
+  cachedSlots[dateIdx][slotIdx][8] = '\0';
+  slotCached[dateIdx][slotIdx] = true;
 
-  sendI2C(SLAVE_WING_A, 0x01, statusA);
-  sendI2C(SLAVE_WING_B, 0x01, statusB);
-
-  // Buzzer: fire if any room transitioned booked → free
-  if ((prevStatusA & ~statusA) || (prevStatusB & ~statusB))
-    buzzerTrigger();
-  prevStatusA = statusA;
-  prevStatusB = statusB;
-
-  lastAutoFetch = millis();
-  lcdRefresh();   // redraw both LCD lines
-
-  Serial.println(String("[Slot] ") + resp +
-    "  " + dateList[dateIdx] + " " + SLOT_PARAMS[slotIdx]);
+  applySlotData(cachedSlots[dateIdx][slotIdx]);
+  lastAutoFetch = millis();   // only reset the 5-min timer on real network fetch
+  Serial.print(F("[Slot] fetched ")); Serial.print(resp);
+  Serial.print(F("  ")); Serial.print(dateList[dateIdx]);
+  Serial.print(' '); Serial.println(SLOT_PARAMS[slotIdx]);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -444,6 +465,7 @@ void loop() {
     pendingRefresh = true;
     refreshStart   = now;
     httpGet("/refresh");
+    memset(slotCached, false, sizeof(slotCached));  // force fresh fetch for all slots
     lcdRow(0, "Refreshing...   ");
   }
   if (pendingRefresh && now - refreshStart >= REFRESH_WAIT_MS) {
@@ -466,7 +488,9 @@ void loop() {
   }
 
   // ── Auto-refresh every 5 minutes ──────────────────────────────────────────
+  // Only invalidate the currently displayed slot so other cached slots stay fast.
   if (now - lastAutoFetch >= AUTO_FETCH_MS) {
+    slotCached[dateIdx][slotIdx] = false;
     fetchAndDisplay();
   }
 }
