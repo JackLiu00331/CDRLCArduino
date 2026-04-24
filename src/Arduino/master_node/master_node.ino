@@ -94,6 +94,7 @@ XPT2046_Touchscreen ts(TOUCH_CS);
 #define COL_DATE 0xFFE0     // yellow          (date + slot line)
 #define COL_TEMP 0xFD20     // orange          (temperature readout)
 #define COL_ACCENT 0x07E0   // bright green    (free-count badge)
+#define COL_ERR_BG 0x4000   // dark red        (error overlay background)
 
 // ── Screen layout  (480×320 landscape after setRotation(1)) ──────────────────
 #define SCREEN_W 480
@@ -412,12 +413,59 @@ void drawQRScreen(int roomIdx)
   tftCenter("Tap anywhere to return", SCREEN_H - 22, 2, COL_TAKEN_FG, COL_BG);
 }
 
+// Draw the header bar with a custom status badge (replaces the "N free" badge).
+// Keeps the date/slot context visible so the user knows what they're waiting for.
+void drawHeaderWithBadge(const char *badge, uint16_t badgeColor)
+{
+  tft.fillRect(0, 0, SCREEN_W, HEADER_H, COL_HDR_BG);
+
+  tft.setTextColor(COL_TITLE, COL_HDR_BG);
+  tft.drawString("CDRLC Study Rooms", 10, 6, 2);
+
+  if (!isnan(cachedTemp))
+  {
+    char env[20];
+    snprintf(env, sizeof(env), "%.1fC  %.0f%%", cachedTemp, cachedHumi);
+    int w = tft.textWidth(env, 2);
+    tft.setTextColor(COL_TEMP, COL_HDR_BG);
+    tft.drawString(env, SCREEN_W - w - 10, 6, 2);
+  }
+
+  if (numDates > 0)
+  {
+    char info[26];
+    snprintf(info, sizeof(info), "%s  %s", datePretty[dateIdx], SLOT_LABELS[slotIdx]);
+    tft.setTextColor(COL_DATE, COL_HDR_BG);
+    tft.drawString(info, 10, 32, 2);
+  }
+
+  int w = tft.textWidth(badge, 2);
+  tft.setTextColor(badgeColor, COL_HDR_BG);
+  tft.drawString(badge, SCREEN_W - w - 10, 32, 2);
+}
+
+// Fill only the content area (below the header) with a centred status message.
+// bigLine is drawn large (font 4, ~26 px); smallLine is drawn smaller below it.
+// The header is left untouched, keeping the date/slot context on screen.
+void drawContentStatus(uint16_t bg, const char *bigLine, const char *smallLine = nullptr)
+{
+  const int cy = HEADER_H;
+  const int ch = SCREEN_H - HEADER_H;                      // 264 px
+  tft.fillRect(0, cy, SCREEN_W, ch, bg);
+  int totalH = 26 + (smallLine ? 26 : 0);                  // font4≈26 + gap+font2≈26
+  int y1 = cy + (ch - totalH) / 2;
+  tftCenter(bigLine, y1, 4, TFT_WHITE, bg);
+  if (smallLine)
+    tftCenter(smallLine, y1 + 36, 2, COL_TAKEN_FG, bg);
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // Touch handler  (called every loop iteration)
 // ══════════════════════════════════════════════════════════════════════════════
 
 void handleTouch()
 {
+  if (pendingRefresh) return;   // block all touch input while a server refresh is in progress
   if (!ts.touched())
     return;
   unsigned long now = millis();
@@ -543,9 +591,27 @@ void fetchAndDisplay()
     return;
   }
 
-  // ── Cache miss: fetch from server, then cache ─────────────────────────────
+  // ── Cache miss: show loading state, then fetch ────────────────────────────
+  // Keep the QR view intact if the user is scanning – only update in NORMAL mode.
+  if (dispState == DISP_NORMAL)
+  {
+    drawHeaderWithBadge("loading...", COL_DATE);
+    drawContentStatus(COL_TAKEN_BG, "Fetching data...", "Please wait");
+  }
+
   String resp = httpGet(String("/slot?date=") + dateList[dateIdx] + "&time=" + SLOT_PARAMS[slotIdx]);
-  if (resp.length() != 8) return;
+  if (resp.length() != 8)
+  {
+    if (dispState == DISP_NORMAL)
+    {
+      drawHeaderWithBadge("error!", TFT_RED);
+      drawContentStatus(COL_ERR_BG, "Network Error", "Showing last known data");
+      unsigned long t = millis();
+      while (millis() - t < 2000) {}   // let user read the error message
+      drawNormalScreen();               // restore previous room data
+    }
+    return;
+  }
 
   strncpy(cachedSlots[dateIdx][slotIdx], resp.c_str(), 8);
   cachedSlots[dateIdx][slotIdx][8] = '\0';
@@ -637,8 +703,9 @@ void setup()
   readDHT11();
   lastDHTRead = millis();
 
+  drawSplash("Loading...", "Getting availability");
   fetchDates();
-  fetchAndDisplay(); // first data fetch → calls drawNormalScreen()
+  fetchAndDisplay(); // first data fetch → shows its own loading overlay then drawNormalScreen()
 }
 
 void loop()
@@ -662,14 +729,16 @@ void loop()
     dispState = DISP_NORMAL;
     pendingRefresh = true;
     refreshStart = now;
-    httpGet("/refresh");
-    memset(slotCached, false, sizeof(slotCached));  // force fresh fetch for all slots
-    tft.fillRect(0, 0, SCREEN_W, HEADER_H, COL_HDR_BG);
-    tftCenter("Refreshing...", (HEADER_H - 16) / 2, 2, COL_DATE, COL_HDR_BG);
+    drawHeaderWithBadge("refreshing...", COL_DATE);
+    drawContentStatus(COL_TAKEN_BG, "Refreshing from server...", "Please wait");
+    httpGet("/refresh");                              // tell server to rebuild its cache
+    memset(slotCached, false, sizeof(slotCached));   // invalidate all local cached slots
   }
   if (pendingRefresh && now - refreshStart >= REFRESH_WAIT_MS)
   {
     pendingRefresh = false;
+    drawHeaderWithBadge("loading...", COL_DATE);
+    drawContentStatus(COL_TAKEN_BG, "Getting availability...", "Please wait");
     fetchDates();
     fetchAndDisplay();
   }
