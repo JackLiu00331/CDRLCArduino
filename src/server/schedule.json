@@ -1,0 +1,14 @@
+{
+  "_comment": "Fallback schedule used when iCal URLs are not yet configured or unreachable.",
+  "_comment2": "Times are 24-hour LOCAL Chicago time (HH:MM). Update each day as needed.",
+  "_comment3": "Example: room 2432 reserved 9:00-11:00 AM and 1:00-3:00 PM today.",
+
+  "2432": [{"start": "15:00", "end": "16:00"}],
+  "2434": [],
+  "2436": [],
+  "2438": [],
+  "2440": [],
+  "2426": [],
+  "2428": [],
+  "2430": []
+}

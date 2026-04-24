@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+server.log
+server_err.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.env
+venv/
+.venv/
+
+# Arduino build artifacts
+build/
+*.elf
+*.hex
+*.bin
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude internal
+.claude/
