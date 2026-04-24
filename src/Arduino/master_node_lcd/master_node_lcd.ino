@@ -230,7 +230,9 @@ void lcdDrawRoomPage() {
 }
 
 // Call every loop(): advances the page if the timer has elapsed.
+// Frozen during pendingRefresh so the "Refreshing…" message is not overwritten.
 void lcdPageTick() {
+  if (pendingRefresh) return;
   if (millis() - lastLCDPage >= LCD_PAGE_MS) {
     lastLCDPage = millis();
     lcdPage = (lcdPage + 1) % 4;
@@ -357,10 +359,29 @@ void fetchAndDisplay() {
     return;
   }
 
-  // ── Cache miss: fetch from server, then cache ─────────────────────────────
+  // ── Cache miss: show loading indicator, then fetch ────────────────────────
+  // We tell the user what we're doing before the blocking HTTP call.
+  {
+    char loadHdr[17];
+    // Line 0: keep date + slot visible so user sees what they requested;
+    //         replace temp field with "  ..." to signal "pending".
+    snprintf(loadHdr, sizeof(loadHdr), "%-5s %-4s   ...",
+             (numDates > 0 ? datePretty[dateIdx] : "??/??"),
+             SLOT_PARAMS[slotIdx]);
+    lcdRow(0, loadHdr);
+    lcdRow(1, "Fetching data...");
+  }
+
   String resp = httpGet(
     String("/slot?date=") + dateList[dateIdx] + "&time=" + SLOT_PARAMS[slotIdx]);
-  if (resp.length() != 8) return;
+  if (resp.length() != 8) {
+    // Network / server error – show brief message then restore previous display.
+    lcdRow(1, "Network error!  ");
+    unsigned long t = millis();
+    while (millis() - t < 1500) {}   // let user read the error (1.5 s)
+    lcdRefresh();                     // redraw last-known data
+    return;
+  }
 
   strncpy(cachedSlots[dateIdx][slotIdx], resp.c_str(), 8);
   cachedSlots[dateIdx][slotIdx][8] = '\0';
@@ -440,8 +461,11 @@ void setup() {
   readDHT11();
   lastDHTRead = millis();
 
+  lcdRow(0, "Getting dates...");
+  lcdRow(1, "Please wait...  ");
   fetchDates();
-  fetchAndDisplay();   // first data load → calls lcdRefresh()
+  // fetchAndDisplay() will show its own "Fetching data..." for the first slot
+  fetchAndDisplay();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -464,12 +488,15 @@ void loop() {
   if (btnPressed(BTN2, 1) && !pendingRefresh) {
     pendingRefresh = true;
     refreshStart   = now;
-    httpGet("/refresh");
-    memset(slotCached, false, sizeof(slotCached));  // force fresh fetch for all slots
     lcdRow(0, "Refreshing...   ");
+    lcdRow(1, "Please wait...  ");     // freeze page cycling + inform user
+    httpGet("/refresh");               // tell server to rebuild its cache
+    memset(slotCached, false, sizeof(slotCached));  // invalidate our local cache
   }
   if (pendingRefresh && now - refreshStart >= REFRESH_WAIT_MS) {
     pendingRefresh = false;
+    lcdRow(0, "Getting dates...");
+    lcdRow(1, "Please wait...  ");
     fetchDates();
     fetchAndDisplay();
   }
