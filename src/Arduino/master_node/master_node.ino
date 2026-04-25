@@ -5,7 +5,7 @@
   ================================================================
   Responsibilities:
     - Connect to WiFi; poll room availability from the NAS server
-    - Drive a 4" ILI9486 TFT touch screen:
+    - Drive a 4" ST7796S TFT touch screen:
         Normal view  – colour-coded room list (green=free / grey=taken)
         QR view      – on-device QR code when user taps a free room
     - On QR tap: user scans QR → Google Calendar booking page opens
@@ -18,7 +18,7 @@
     Master (this board) : no address – Wire.begin() with no arg
     0x08  Arduino 2     : DHT11 sensor – requestFrom(0x08, 4)
     0x09  Arduino 3     : Wing A LEDs  (rooms 2432 2434 2436 2438 2440)
-    0x0A  Arduino 4     : Wing B LEDs  (rooms 2426 2428 2430)
+    0x0A  Arduino 4                                                                           : Wing B LEDs  (rooms 2426 2428 2430)
 
   Pin assignments:
     D4   Button 1 – next time slot

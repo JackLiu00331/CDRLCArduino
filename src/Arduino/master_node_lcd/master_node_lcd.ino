@@ -5,7 +5,7 @@
   ================================================================
   LCD FALLBACK / DEVELOPMENT BUILD
 
-  Use this sketch while the 4" TFT touch screen (Hosyond ILI9486)
+  Use this sketch while the 4" TFT touch screen (Hosyond ST7796S)
   has not yet arrived. It is functionally identical to the TFT
   version (v5.0) in all server, I2C, button, and buzzer behaviour,
   but replaces TFT + touch + QR-code output with a 16×2

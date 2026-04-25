@@ -30,7 +30,7 @@ A real-time study room availability system for a university library (CDRLC). Fou
 
 | Board | Model | Key hardware |
 |-------|-------|-------------|
-| Arduino 1 – Master | Arduino R4 WiFi | 4" TFT (ILI9486), XPT2046 touch, passive buzzer, 3× push buttons |
+| Arduino 1 – Master | Arduino R4 WiFi | 4" TFT (ST7796S), XPT2046 touch, passive buzzer, 3× push buttons |
 | Arduino 2 – Env Node | Arduino UNO R3 | DHT11 temperature & humidity sensor |
 | Arduino 3 – Wing A | Arduino UNO R3 | 5× bi-color LEDs (rooms 2432–2440), LDR |
 | Arduino 4 – Wing B | Arduino UNO R3 | 3× bi-color LEDs (rooms 2426–2430), HC-SR04 ultrasonic |
@@ -39,7 +39,7 @@ A real-time study room availability system for a university library (CDRLC). Fou
 
 - Arduino R4 WiFi × 1
 - Arduino UNO R3 × 3
-- Hosyond 4.0" 480×320 TFT LCD (ILI9486 driver, SPI, includes XPT2046 touch) × 1
+- Hosyond 4.0" 480×320 TFT LCD (ST7796S driver, SPI, includes XPT2046 touch) × 1
 - DHT11 temperature & humidity sensor × 1
 - Bi-color (red/green common-cathode) LED × 8
 - 220 Ω resistors × 8 (LED current limiting)
@@ -186,7 +186,7 @@ Controls **3 bi-color LEDs** for rooms 2426, 2428, 2430.
 | File | Description |
 |------|-------------|
 | `master_node/master_node.ino` | Main controller: WiFi, TFT, touch, QR generation, I2C master, buttons, buzzer |
-| `master_node/User_Setup.h` | TFT_eSPI pin & driver configuration for ILI9486 on R4 WiFi |
+| `master_node/User_Setup.h` | TFT_eSPI pin & driver configuration for ST7796S on R4 WiFi |
 | `ui_node/ui_node.ino` | Arduino 2: DHT11 I2C slave, responds to requestFrom with 4-byte temp/humi packet |
 | `wing_a.ino` | Arduino 3: Wing A bi-color LED controller with LDR auto-brightness |
 | `wing_b.ino` | Arduino 4: Wing B bi-color LED controller with HC-SR04 proximity dimming |
