@@ -305,7 +305,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/slot":
             d = params.get("date", "")
             t = params.get("time", "")
-            if len(d) == 8 and len(t) == 4:
+            if len(d) == 8 and d.isdigit() and len(t) == 4 and t.isdigit():
                 self.reply(get_slot_string(d, t))
             else:
                 self.reply("ERR: need ?date=YYYYMMDD&time=HHMM", 400)
