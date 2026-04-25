@@ -18,7 +18,7 @@
     Master (this board) : no address – Wire.begin() with no arg
     0x08  Arduino 2     : DHT11 sensor – requestFrom(0x08, 4)
     0x09  Arduino 3     : Wing A LEDs  (rooms 2432 2434 2436 2438 2440)
-    0x0A  Arduino 4     : Wing B LEDs  (rooms 2426 2428 2430)
+    0x0A  Arduino 4                                                                           : Wing B LEDs  (rooms 2426 2428 2430)
 
   Pin assignments:
     D4   Button 1 – next time slot
@@ -50,7 +50,6 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <TFT_eSPI.h>
-#include <XPT2046_Touchscreen.h>
 #include <qrcode.h>
 
 // ── WiFi & server ─────────────────────────────────────────────────────────────
@@ -69,19 +68,15 @@ const int SERVER_PORT = 443;                          // HTTPS via Tailscale Fun
 #define BTN2 5
 #define BTN3 6
 #define BUZZER_PIN 8
-#define TOUCH_CS A1 // XPT2046 chip-select (digital pin 15 on R4)
 
-// ── TFT & touch objects ───────────────────────────────────────────────────────
-// Physical pins are declared in User_Setup.h; TFT_eSPI reads that file.
+// ── TFT object ───────────────────────────────────────────────────────────────
+// Touch is handled by TFT_eSPI's built-in XPT2046 driver (no separate library).
+// TOUCH_CS pin is declared in User_Setup.h (pin 15 / A1).
 TFT_eSPI tft;
-XPT2046_Touchscreen ts(TOUCH_CS);
 
-// Touch calibration – run the TFT_eSPI Touch_calibrate example sketch once
-// to find your panel's true min/max ADC values and update these four defines.
-#define TS_MINX 200
-#define TS_MAXX 3800
-#define TS_MINY 200
-#define TS_MAXY 3800
+// Touch calibration data – obtained by running the TFT_eSPI Touch_calibrate
+// example and recording the five values it prints.  Re-run if touch feels off.
+static const uint16_t TOUCH_CAL[5] = { 277, 3647, 219, 3577, 7 };
 
 // ── Colours (RGB565) ──────────────────────────────────────────────────────────
 #define COL_BG 0x0000       // black
@@ -94,6 +89,7 @@ XPT2046_Touchscreen ts(TOUCH_CS);
 #define COL_DATE 0xFFE0     // yellow          (date + slot line)
 #define COL_TEMP 0xFD20     // orange          (temperature readout)
 #define COL_ACCENT 0x07E0   // bright green    (free-count badge)
+#define COL_ERR_BG 0x4000   // dark red        (error overlay background)
 
 // ── Screen layout  (480×320 landscape after setRotation(1)) ──────────────────
 #define SCREEN_W 480
@@ -151,6 +147,17 @@ enum DispState
 DispState dispState = DISP_NORMAL;
 unsigned long lastTouchTime = 0;
 const unsigned long TOUCH_COOLDOWN = 500UL; // ms between accepted touches
+// After any QR ↔ Normal transition, block all touches until the finger
+// physically leaves the screen.  Prevents one tap from firing two actions
+// (e.g. "dismiss QR" immediately re-booking the same room).
+bool touchMustRelease = false;
+
+// ── Slot data cache ───────────────────────────────────────────────────────────
+// Avoids a network round-trip on every button press.
+// cachedSlots[dateIdx][slotIdx] = 8-char status string ("10010100")
+// slotCached[dateIdx][slotIdx]  = true once that slot has been fetched.
+char cachedSlots[5][8][9];
+bool slotCached[5][8];     // zero-initialised (all false) by default
 
 // ── Button debounce ───────────────────────────────────────────────────────────
 unsigned long btnTime[3] = {0, 0, 0};
@@ -355,54 +362,121 @@ void drawNormalScreen()
   }
 }
 
-// QR screen: full-screen QR code pointing to a room's Google Calendar page
+// QR screen: full-screen QR code for a room's Google Calendar booking page.
+// URLs are taken directly from GCAL_URLS[] (flash) — no network call needed.
+//
+// QR Version 7 (45×45 modules), ECC_LOW, byte-mode capacity = 154 chars.
+// All CDRLC Google Calendar URLs are ~140 chars — comfortably within capacity.
+// Buffer: ceil(45²/8) = 254 bytes → static uint8_t qrData[256].
+// Display: scale=5, QR = 225×225 px — large and easily scannable.
+//
+// IMPORTANT: ricmoo qrcode library returns 0 on success (C convention).
+// Never cast the return value to bool. Check qrc.size > 0 instead.
 void drawQRScreen(int roomIdx)
 {
-  // Version 9, ECC_LOW → max 154 bytes; our ~143-char URLs fit comfortably.
-  // Buffer for V9: ceil(53×53 / 8) + 1 = 353 bytes; 400 is a safe upper bound.
-  uint8_t qrData[400];
+  // ── Generate QR from Google Calendar URL (instant, no network) ───────────
+  static uint8_t qrData[256];   // V7 needs 254 bytes; 256 gives safe margin
   QRCode qrc;
-  if (!qrcode_initText(&qrc, qrData, 9, ECC_LOW, GCAL_URLS[roomIdx]))
+  qrcode_initText(&qrc, qrData, 7, ECC_LOW, GCAL_URLS[roomIdx]);
+
+  Serial.print(F("[QR] Room ")); Serial.print(ROOM_NAMES[roomIdx]);
+  Serial.print(F("  size=")); Serial.print(qrc.size);
+  Serial.print(F("  url_len=")); Serial.println(strlen(GCAL_URLS[roomIdx]));
+
+  if (qrc.size == 0)
   {
+    Serial.println(F("[QR] ERROR: size=0 — URL exceeds V7 ECC_LOW 154-char limit"));
     tft.fillScreen(COL_BG);
-    tftCenter("QR Error: URL too long", SCREEN_H / 2, 2, TFT_RED, COL_BG);
+    tftCenter("QR Error", SCREEN_H / 2, 4, TFT_RED, COL_BG);
+    unsigned long t = millis();
+    while (millis() - t < 2000) {}
+    dispState = DISP_NORMAL;
+    drawNormalScreen();
     return;
   }
 
+  // ── Header (44 px): room name + date/slot context ────────────────────────
   tft.fillScreen(COL_BG);
-
-  // Header
   tft.fillRect(0, 0, SCREEN_W, 44, COL_HDR_BG);
+
   char hdr[32];
   snprintf(hdr, sizeof(hdr), "Room %s  -  Scan to Book", ROOM_NAMES[roomIdx]);
-  tftCenter(hdr, 13, 2, COL_TITLE, COL_HDR_BG);
+  tftCenter(hdr, 6, 2, COL_TITLE, COL_HDR_BG);
 
-  // Centre QR in the space between header (44 px) and footer (28 px)
-  const int SCALE = 4; // 53 × 4 = 212 px wide
+  if (numDates > 0)
+  {
+    char sub[30];
+    snprintf(sub, sizeof(sub), "%s  %s", datePretty[dateIdx], SLOT_LABELS[slotIdx]);
+    tftCenter(sub, 26, 2, COL_DATE, COL_HDR_BG);
+  }
+
+  // ── QR code: scale to fill available area ────────────────────────────────
+  // Available: 480×(320-44-28) = 480×248 px.
+  // V7 (size=45): scale = min(480-16/45, 248/45) = min(10,5) = 5 → 225×225 px
+  const int AVAIL_H = SCREEN_H - 44 - 28;
+  const int AVAIL_W = SCREEN_W - 16;
+  int SCALE = min(AVAIL_W / (int)qrc.size, AVAIL_H / (int)qrc.size);
+  if (SCALE < 1) SCALE = 1;
   const int QR_PX = (int)qrc.size * SCALE;
-  const int AVAIL = SCREEN_H - 44 - 28;
-  const int xOff = (SCREEN_W - QR_PX) / 2;
-  const int yOff = 44 + (AVAIL - QR_PX) / 2;
+  const int xOff  = (SCREEN_W - QR_PX) / 2;
+  const int yOff  = 44 + (AVAIL_H - QR_PX) / 2;
 
-  // White quiet-zone background
-  tft.fillRect(xOff - 8, yOff - 8, QR_PX + 16, QR_PX + 16, TFT_WHITE);
+  tft.fillRect(xOff - 4, yOff - 4, QR_PX + 8, QR_PX + 8, TFT_WHITE);
 
-  // Dark modules
   tft.startWrite();
   for (int row = 0; row < (int)qrc.size; row++)
-  {
     for (int col = 0; col < (int)qrc.size; col++)
-    {
       if (qrcode_getModule(&qrc, col, row))
-      {
         tft.fillRect(xOff + col * SCALE, yOff + row * SCALE, SCALE, SCALE, TFT_BLACK);
-      }
-    }
-  }
   tft.endWrite();
 
-  // Footer
   tftCenter("Tap anywhere to return", SCREEN_H - 22, 2, COL_TAKEN_FG, COL_BG);
+}
+
+// Draw the header bar with a custom status badge (replaces the "N free" badge).
+// Keeps the date/slot context visible so the user knows what they're waiting for.
+void drawHeaderWithBadge(const char *badge, uint16_t badgeColor)
+{
+  tft.fillRect(0, 0, SCREEN_W, HEADER_H, COL_HDR_BG);
+
+  tft.setTextColor(COL_TITLE, COL_HDR_BG);
+  tft.drawString("CDRLC Study Rooms", 10, 6, 2);
+
+  if (!isnan(cachedTemp))
+  {
+    char env[20];
+    snprintf(env, sizeof(env), "%.1fC  %.0f%%", cachedTemp, cachedHumi);
+    int w = tft.textWidth(env, 2);
+    tft.setTextColor(COL_TEMP, COL_HDR_BG);
+    tft.drawString(env, SCREEN_W - w - 10, 6, 2);
+  }
+
+  if (numDates > 0)
+  {
+    char info[26];
+    snprintf(info, sizeof(info), "%s  %s", datePretty[dateIdx], SLOT_LABELS[slotIdx]);
+    tft.setTextColor(COL_DATE, COL_HDR_BG);
+    tft.drawString(info, 10, 32, 2);
+  }
+
+  int w = tft.textWidth(badge, 2);
+  tft.setTextColor(badgeColor, COL_HDR_BG);
+  tft.drawString(badge, SCREEN_W - w - 10, 32, 2);
+}
+
+// Fill only the content area (below the header) with a centred status message.
+// bigLine is drawn large (font 4, ~26 px); smallLine is drawn smaller below it.
+// The header is left untouched, keeping the date/slot context on screen.
+void drawContentStatus(uint16_t bg, const char *bigLine, const char *smallLine = nullptr)
+{
+  const int cy = HEADER_H;
+  const int ch = SCREEN_H - HEADER_H;                      // 264 px
+  tft.fillRect(0, cy, SCREEN_W, ch, bg);
+  int totalH = 26 + (smallLine ? 26 : 0);                  // font4≈26 + gap+font2≈26
+  int y1 = cy + (ch - totalH) / 2;
+  tftCenter(bigLine, y1, 4, TFT_WHITE, bg);
+  if (smallLine)
+    tftCenter(smallLine, y1 + 36, 2, COL_TAKEN_FG, bg);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -411,16 +485,30 @@ void drawQRScreen(int roomIdx)
 
 void handleTouch()
 {
-  if (!ts.touched())
+  if (pendingRefresh) return;
+
+  // tft.getTouch() applies the stored calibration and returns true screen
+  // coordinates (0–479, 0–319) directly – no manual map() needed.
+  uint16_t tx, ty;
+  bool isTouched = tft.getTouch(&tx, &ty);
+
+  // Wait-for-release guard: after any QR↔Normal transition, ignore all
+  // touches until the finger physically leaves the screen.  This prevents
+  // the "dismiss QR" tap from immediately re-booking the same room because
+  // the finger is still down when the new screen renders.
+  if (touchMustRelease)
+  {
+    if (!isTouched) touchMustRelease = false;
     return;
+  }
+
+  if (!isTouched) return;
+
   unsigned long now = millis();
   if (now - lastTouchTime < TOUCH_COOLDOWN)
     return;
   lastTouchTime = now;
 
-  TS_Point p = ts.getPoint();
-  int tx = constrain(map(p.x, TS_MINX, TS_MAXX, 0, SCREEN_W - 1), 0, SCREEN_W - 1);
-  int ty = constrain(map(p.y, TS_MINY, TS_MAXY, 0, SCREEN_H - 1), 0, SCREEN_H - 1);
   Serial.print(F("[Touch] "));
   Serial.print(tx);
   Serial.print(',');
@@ -428,9 +516,10 @@ void handleTouch()
 
   if (dispState == DISP_QR)
   {
-    // Any tap on QR screen → return to room list
+    // Any tap on QR screen → return to room list; require finger lift first.
     dispState = DISP_NORMAL;
     drawNormalScreen();
+    touchMustRelease = true;
     return;
   }
 
@@ -443,6 +532,7 @@ void handleTouch()
       Serial.println(ROOM_NAMES[row]);
       dispState = DISP_QR;
       drawQRScreen(row);
+      touchMustRelease = true;   // require finger lift before next action
     }
   }
 }
@@ -497,45 +587,76 @@ void fetchDates()
     start = comma + 1;
   }
   dateIdx = (numDates > 1) ? 1 : 0;
+  memset(slotCached, false, sizeof(slotCached));  // date list changed → invalidate all
   Serial.print(F("[Dates] got "));
   Serial.println(numDates);
 }
 
-void fetchAndDisplay()
+// Apply a slot data string to LEDs and TFT (shared by cache-hit and network paths).
+void applySlotData(const char *data)
 {
-  if (numDates == 0)
-    return;
-
-  String resp = httpGet(String("/slot?date=") + dateList[dateIdx] + "&time=" + SLOT_PARAMS[slotIdx]);
-  if (resp.length() != 8)
-    return;
-
   uint8_t statusA = 0, statusB = 0;
   for (int i = 0; i < 8; i++)
   {
-    roomFree[i] = (resp[i] == '0'); // '0' = slot available
-    if (resp[i] == '1')
-    { // '1' = booked
-      if (i < 5)
-        statusA |= (1 << i);
-      else
-        statusB |= (1 << (i - 5));
+    roomFree[i] = (data[i] == '0');
+    if (data[i] == '1')
+    {
+      if (i < 5) statusA |= (1 << i);
+      else       statusB |= (1 << (i - 5));
     }
   }
-
   sendI2C(SLAVE_WING_A, 0x01, statusA);
   sendI2C(SLAVE_WING_B, 0x01, statusB);
-
-  // Buzzer: fire if any room transitioned from booked → free
-  if ((prevStatusA & ~statusA) || (prevStatusB & ~statusB))
-    buzzerTrigger();
+  if ((prevStatusA & ~statusA) || (prevStatusB & ~statusB)) buzzerTrigger();
   prevStatusA = statusA;
   prevStatusB = statusB;
+  if (dispState == DISP_NORMAL) drawNormalScreen();
+}
 
-  lastAutoFetch = millis();
+void fetchAndDisplay()
+{
+  if (numDates == 0) return;
+
+  // ── Cache hit: instant display, no network call ───────────────────────────
+  if (slotCached[dateIdx][slotIdx])
+  {
+    Serial.print(F("[Cache] ")); Serial.print(dateList[dateIdx]);
+    Serial.print(' '); Serial.println(SLOT_PARAMS[slotIdx]);
+    applySlotData(cachedSlots[dateIdx][slotIdx]);
+    return;
+  }
+
+  // ── Cache miss: show loading state, then fetch ────────────────────────────
+  // Keep the QR view intact if the user is scanning – only update in NORMAL mode.
   if (dispState == DISP_NORMAL)
-    drawNormalScreen();
-  Serial.println(String("[Slot] ") + resp + "  " + dateList[dateIdx] + " " + SLOT_PARAMS[slotIdx]);
+  {
+    drawHeaderWithBadge("loading...", COL_DATE);
+    drawContentStatus(COL_TAKEN_BG, "Fetching data...", "Please wait");
+  }
+
+  String resp = httpGet(String("/slot?date=") + dateList[dateIdx] + "&time=" + SLOT_PARAMS[slotIdx]);
+  if (resp.length() != 8)
+  {
+    if (dispState == DISP_NORMAL)
+    {
+      drawHeaderWithBadge("error!", TFT_RED);
+      drawContentStatus(COL_ERR_BG, "Network Error", "Showing last known data");
+      unsigned long t = millis();
+      while (millis() - t < 2000) {}   // let user read the error message
+      drawNormalScreen();               // restore previous room data
+    }
+    return;
+  }
+
+  strncpy(cachedSlots[dateIdx][slotIdx], resp.c_str(), 8);
+  cachedSlots[dateIdx][slotIdx][8] = '\0';
+  slotCached[dateIdx][slotIdx] = true;
+
+  applySlotData(cachedSlots[dateIdx][slotIdx]);
+  lastAutoFetch = millis();   // only reset 5-min timer on real network fetch
+  Serial.print(F("[Slot] fetched ")); Serial.print(resp);
+  Serial.print(F("  ")); Serial.print(dateList[dateIdx]);
+  Serial.print(' '); Serial.println(SLOT_PARAMS[slotIdx]);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -569,8 +690,8 @@ void setup()
   tft.setRotation(1); // landscape: 480 wide × 320 tall
   tft.fillScreen(COL_BG);
 
-  // Touch controller – shares the same SPI bus
-  ts.begin();
+  // Touch – TFT_eSPI built-in driver; apply calibration data.
+  tft.setTouch(const_cast<uint16_t*>(TOUCH_CAL));
 
   drawSplash("CDRLC Monitor", "Starting up...");
 
@@ -617,8 +738,9 @@ void setup()
   readDHT11();
   lastDHTRead = millis();
 
+  drawSplash("Loading...", "Getting availability");
   fetchDates();
-  fetchAndDisplay(); // first data fetch → calls drawNormalScreen()
+  fetchAndDisplay(); // first data fetch → shows its own loading overlay then drawNormalScreen()
 }
 
 void loop()
@@ -631,8 +753,14 @@ void loop()
   // BTN1 – advance to next time slot
   if (btnPressed(BTN1, 0))
   {
-    dispState = DISP_NORMAL;
+    Serial.print(F("[BTN1/D4] slotIdx: "));
+    Serial.print(slotIdx); Serial.print(F(" -> "));
     slotIdx = (slotIdx + 1) % NUM_SLOTS;
+    Serial.print(slotIdx);
+    Serial.print(F("  ("));
+    Serial.print(SLOT_LABELS[slotIdx]);
+    Serial.println(F(")"));
+    dispState = DISP_NORMAL;
     fetchAndDisplay();
   }
 
@@ -642,13 +770,16 @@ void loop()
     dispState = DISP_NORMAL;
     pendingRefresh = true;
     refreshStart = now;
-    httpGet("/refresh");
-    tft.fillRect(0, 0, SCREEN_W, HEADER_H, COL_HDR_BG);
-    tftCenter("Refreshing...", (HEADER_H - 16) / 2, 2, COL_DATE, COL_HDR_BG);
+    drawHeaderWithBadge("refreshing...", COL_DATE);
+    drawContentStatus(COL_TAKEN_BG, "Refreshing from server...", "Please wait");
+    httpGet("/refresh");                              // tell server to rebuild its cache
+    memset(slotCached, false, sizeof(slotCached));   // invalidate all local cached slots
   }
   if (pendingRefresh && now - refreshStart >= REFRESH_WAIT_MS)
   {
     pendingRefresh = false;
+    drawHeaderWithBadge("loading...", COL_DATE);
+    drawContentStatus(COL_TAKEN_BG, "Getting availability...", "Please wait");
     fetchDates();
     fetchAndDisplay();
   }
@@ -656,8 +787,14 @@ void loop()
   // BTN3 – advance to next available date
   if (btnPressed(BTN3, 2) && numDates > 0)
   {
-    dispState = DISP_NORMAL;
+    Serial.print(F("[BTN3/D6] dateIdx: "));
+    Serial.print(dateIdx); Serial.print(F(" -> "));
     dateIdx = (dateIdx + 1) % numDates;
+    Serial.print(dateIdx);
+    Serial.print(F("  ("));
+    Serial.print(datePretty[dateIdx]);
+    Serial.println(F(")"));
+    dispState = DISP_NORMAL;
     fetchAndDisplay();
   }
 
@@ -671,8 +808,10 @@ void loop()
   }
 
   // Auto-refresh every 5 minutes
+  // Only invalidate current slot so other cached slots stay fast.
   if (now - lastAutoFetch >= AUTO_FETCH_MS)
   {
+    slotCached[dateIdx][slotIdx] = false;
     fetchAndDisplay();
   }
 }
