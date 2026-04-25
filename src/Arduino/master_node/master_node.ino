@@ -362,51 +362,30 @@ void drawNormalScreen()
   }
 }
 
-// QR screen: full-screen QR code pointing to a room's Google Calendar page
+// QR screen: full-screen QR code for a room's Google Calendar booking page.
+// URLs are taken directly from GCAL_URLS[] (flash) — no network call needed.
+//
+// QR Version 7 (45×45 modules), ECC_LOW, byte-mode capacity = 154 chars.
+// All CDRLC Google Calendar URLs are ~140 chars — comfortably within capacity.
+// Buffer: ceil(45²/8) = 254 bytes → static uint8_t qrData[256].
+// Display: scale=5, QR = 225×225 px — large and easily scannable.
+//
+// IMPORTANT: ricmoo qrcode library returns 0 on success (C convention).
+// Never cast the return value to bool. Check qrc.size > 0 instead.
 void drawQRScreen(int roomIdx)
 {
-  // ── Step 1: loading screen ────────────────────────────────────────────────
-  tft.fillScreen(COL_BG);
-  tft.fillRect(0, 0, SCREEN_W, 44, COL_HDR_BG);
-  char hdr[32];
-  snprintf(hdr, sizeof(hdr), "Room %s  -  Scan to Book", ROOM_NAMES[roomIdx]);
-  tftCenter(hdr, 13, 2, COL_TITLE, COL_HDR_BG);
-  tftCenter("Getting booking link...", SCREEN_H / 2 - 10, 2, COL_DATE, COL_BG);
-  tftCenter("Please wait", SCREEN_H / 2 + 14, 2, COL_TAKEN_FG, COL_BG);
-
-  // ── Step 2: ask server for a short booking code ───────────────────────────
-  // /newbook returns a 6-char alphanumeric code (e.g. "A1B2C3").
-  // The phone then opens /b/<CODE> which shows a mobile booking page
-  // with a direct link to the room's Google Calendar appointment page.
-  String path = String("/newbook?date=") + dateList[dateIdx]
-                + "&time=" + SLOT_PARAMS[slotIdx];
-  String code = httpGet(path);
-  code.trim();
-
-  if (code.length() < 4)
-  {
-    tft.fillScreen(COL_BG);
-    tftCenter("Server error", SCREEN_H / 2, 4, TFT_RED, COL_BG);
-    unsigned long t = millis();
-    while (millis() - t < 2000) {}
-    dispState = DISP_NORMAL;
-    drawNormalScreen();
-    return;
-  }
-
-  // ── Step 3: build short URL (~45 chars) ──────────────────────────────────
-  // e.g. "https://zz-cloud.tail6b9dfa.ts.net/b/A1B2C3"
-  // This comfortably fits in QR Version 3, ECC_LOW (53-byte capacity).
-  char shortUrl[80];
-  snprintf(shortUrl, sizeof(shortUrl), "https://%s/b/%s", SERVER_IP, code.c_str());
-
-  // ── Step 4: generate QR ───────────────────────────────────────────────────
-  // Version 3 (29×29 modules) → buffer = ceil(29²/8) = 106 bytes.
-  // Declared static to avoid stack pressure.
-  static uint8_t qrData[112];
+  // ── Generate QR from Google Calendar URL (instant, no network) ───────────
+  static uint8_t qrData[256];   // V7 needs 254 bytes; 256 gives safe margin
   QRCode qrc;
-  if (!qrcode_initText(&qrc, qrData, 3, ECC_LOW, shortUrl))
+  qrcode_initText(&qrc, qrData, 7, ECC_LOW, GCAL_URLS[roomIdx]);
+
+  Serial.print(F("[QR] Room ")); Serial.print(ROOM_NAMES[roomIdx]);
+  Serial.print(F("  size=")); Serial.print(qrc.size);
+  Serial.print(F("  url_len=")); Serial.println(strlen(GCAL_URLS[roomIdx]));
+
+  if (qrc.size == 0)
   {
+    Serial.println(F("[QR] ERROR: size=0 — URL exceeds V7 ECC_LOW 154-char limit"));
     tft.fillScreen(COL_BG);
     tftCenter("QR Error", SCREEN_H / 2, 4, TFT_RED, COL_BG);
     unsigned long t = millis();
@@ -416,22 +395,33 @@ void drawQRScreen(int roomIdx)
     return;
   }
 
-  // ── Step 5: draw QR code ──────────────────────────────────────────────────
+  // ── Header (44 px): room name + date/slot context ────────────────────────
   tft.fillScreen(COL_BG);
   tft.fillRect(0, 0, SCREEN_W, 44, COL_HDR_BG);
-  tftCenter(hdr, 13, 2, COL_TITLE, COL_HDR_BG);
 
-  // Scale QR to fill available space (header 44 px, footer 28 px).
-  // For V3 (size=29): AVAIL_H=248 → scale=8 → 232×232 px QR (large & easy to scan).
+  char hdr[32];
+  snprintf(hdr, sizeof(hdr), "Room %s  -  Scan to Book", ROOM_NAMES[roomIdx]);
+  tftCenter(hdr, 6, 2, COL_TITLE, COL_HDR_BG);
+
+  if (numDates > 0)
+  {
+    char sub[30];
+    snprintf(sub, sizeof(sub), "%s  %s", datePretty[dateIdx], SLOT_LABELS[slotIdx]);
+    tftCenter(sub, 26, 2, COL_DATE, COL_HDR_BG);
+  }
+
+  // ── QR code: scale to fill available area ────────────────────────────────
+  // Available: 480×(320-44-28) = 480×248 px.
+  // V7 (size=45): scale = min(480-16/45, 248/45) = min(10,5) = 5 → 225×225 px
   const int AVAIL_H = SCREEN_H - 44 - 28;
   const int AVAIL_W = SCREEN_W - 16;
   int SCALE = min(AVAIL_W / (int)qrc.size, AVAIL_H / (int)qrc.size);
   if (SCALE < 1) SCALE = 1;
   const int QR_PX = (int)qrc.size * SCALE;
-  const int xOff = (SCREEN_W - QR_PX) / 2;
-  const int yOff = 44 + (AVAIL_H - QR_PX) / 2;
+  const int xOff  = (SCREEN_W - QR_PX) / 2;
+  const int yOff  = 44 + (AVAIL_H - QR_PX) / 2;
 
-  tft.fillRect(xOff - 8, yOff - 8, QR_PX + 16, QR_PX + 16, TFT_WHITE);
+  tft.fillRect(xOff - 4, yOff - 4, QR_PX + 8, QR_PX + 8, TFT_WHITE);
 
   tft.startWrite();
   for (int row = 0; row < (int)qrc.size; row++)
@@ -763,8 +753,14 @@ void loop()
   // BTN1 – advance to next time slot
   if (btnPressed(BTN1, 0))
   {
-    dispState = DISP_NORMAL;
+    Serial.print(F("[BTN1/D4] slotIdx: "));
+    Serial.print(slotIdx); Serial.print(F(" -> "));
     slotIdx = (slotIdx + 1) % NUM_SLOTS;
+    Serial.print(slotIdx);
+    Serial.print(F("  ("));
+    Serial.print(SLOT_LABELS[slotIdx]);
+    Serial.println(F(")"));
+    dispState = DISP_NORMAL;
     fetchAndDisplay();
   }
 
@@ -791,8 +787,14 @@ void loop()
   // BTN3 – advance to next available date
   if (btnPressed(BTN3, 2) && numDates > 0)
   {
-    dispState = DISP_NORMAL;
+    Serial.print(F("[BTN3/D6] dateIdx: "));
+    Serial.print(dateIdx); Serial.print(F(" -> "));
     dateIdx = (dateIdx + 1) % numDates;
+    Serial.print(dateIdx);
+    Serial.print(F("  ("));
+    Serial.print(datePretty[dateIdx]);
+    Serial.println(F(")"));
+    dispState = DISP_NORMAL;
     fetchAndDisplay();
   }
 
