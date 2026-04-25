@@ -264,9 +264,17 @@ String httpGet(const String &path)
   http.connectionKeepAlive();
   if (http.get(path) != 0)
     return "";
-  if (http.responseStatusCode() != 200)
-    return "";
+  int statusCode = http.responseStatusCode();
+  // Always consume the response body — even on non-200 — so that the
+  // keep-alive connection is left in a clean state for the next request.
+  // Returning early without reading body leaves stale bytes in the socket
+  // and corrupts the next request on the same connection.
   String body = http.responseBody();
+  if (statusCode != 200)
+  {
+    Serial.print(F("[HTTP] status ")); Serial.println(statusCode);
+    return "";
+  }
   body.trim();
   return body;
 }
