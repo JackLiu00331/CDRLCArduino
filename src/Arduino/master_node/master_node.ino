@@ -5,7 +5,7 @@
   ================================================================
   Responsibilities:
     - Connect to WiFi; poll room availability from the NAS server
-    - Drive a 4" ST7796S TFT touch screen:
+    - Drive a 4" ILI9486 TFT touch screen:
         Normal view  – colour-coded room list (green=free / grey=taken)
         QR view      – on-device QR code when user taps a free room
     - On QR tap: user scans QR → Google Calendar booking page opens

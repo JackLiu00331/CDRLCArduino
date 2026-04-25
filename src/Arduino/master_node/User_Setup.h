@@ -1,17 +1,24 @@
 // ============================================================
 // TFT_eSPI  User_Setup.h
-// Hosyond 4.0"  480×320  ST7796S (SPI)  on  Arduino R4 WiFi
+// Hosyond 4.0"  480×320  ILI9486 (SPI)  on  Arduino R4 WiFi
 //
 // Place this file in the master_node/ sketch folder.
 // TFT_eSPI searches the sketch directory before its own
 // library folder, so this override takes effect automatically.
 //
-// If colours look wrong (red ↔ blue swapped) change
-//   TFT_RGB_ORDER  from  TFT_RGB  to  TFT_BGR
-// If display is garbled, lower SPI_FREQUENCY to 20000000.
+// ── Troubleshooting ──────────────────────────────────────────
+// Colours wrong (red ↔ blue swapped):
+//   TFT_RGB_ORDER is already set to TFT_BGR below.
+//   If colours are still wrong, swap it to TFT_RGB.
+//
+// Display looks like a photographic negative (inverted):
+//   Uncomment:  #define TFT_INVERSION_ON
+//
+// Screen garbled / no output:
+//   Lower SPI_FREQUENCY to 16000000.
 // ============================================================
 
-#define ST7796_DRIVER
+#define ILI9486_DRIVER
 
 // Internal panel dimensions in portrait orientation.
 // setRotation(1) in code gives us the 480×320 landscape view.
@@ -30,12 +37,20 @@
 #define TOUCH_CS  15    // A1   – XPT2046 touch chip-select
 
 // ── SPI clock frequencies ────────────────────────────────────
-#define SPI_FREQUENCY        27000000
+// ILI9486 SPI timing is more conservative than ST7796S.
+// 20 MHz is a safe starting point; try 27000000 if you want
+// faster redraws and the display is stable.
+#define SPI_FREQUENCY        20000000
 #define SPI_TOUCH_FREQUENCY   2500000
 #define SPI_READ_FREQUENCY    8000000
 
 // ── Colour byte order ────────────────────────────────────────
-#define TFT_RGB_ORDER TFT_RGB   // swap to TFT_BGR if colours look wrong
+// ILI9486 sends Blue before Red (BGR), opposite to ST7796S.
+// Swap to TFT_RGB if colours look wrong after this change.
+#define TFT_RGB_ORDER TFT_BGR
+
+// ── Colour inversion (uncomment if display looks inverted) ───
+// #define TFT_INVERSION_ON
 
 // ── Backlight polarity ───────────────────────────────────────
 #define TFT_BACKLIGHT_ON HIGH

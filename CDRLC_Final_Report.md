@@ -284,11 +284,11 @@ Open **Arduino IDE → Tools → Manage Libraries** and install each of the foll
 
 #### 6.8 Configure `User_Setup.h`
 
-TFT_eSPI looks for a `User_Setup.h` file in the sketch directory. Place the provided `User_Setup.h` in `master_node/` alongside `master_node.ino`. This file tells TFT_eSPI which driver IC (ST7796S) and which SPI pins to use. **Without this file, the library will use incorrect default pin assignments and the screen will not display anything.**
+TFT_eSPI looks for a `User_Setup.h` file in the sketch directory. Place the provided `User_Setup.h` in `master_node/` alongside `master_node.ino`. This file tells TFT_eSPI which driver IC (ILI9486) and which SPI pins to use. **Without this file, the library will use incorrect default pin assignments and the screen will not display anything.**
 
 Key settings:
 ```cpp
-#define ST7796_DRIVER
+#define ILI9486_DRIVER
 #define TFT_CS    10    // D10
 #define TFT_DC    14    // A0
 #define TFT_RST    9    // D9
@@ -540,7 +540,7 @@ This section documents the significant design ideas explored during development,
 
 **Why it was rejected:** The 16×2 LCD can only display 32 characters at a time. With 8 rooms to show, the system needed to scroll through them, which felt clunky and made it impossible to see all rooms simultaneously. The OLED-for-QR problem (see Idea 1) compounded this. Additionally, having Arduino 2 responsible for both DHT11 sensing and driving a parallel LCD with room data (received via I2C from the master) created a complex state machine with many failure modes. The LCD wiring also required ~6 digital pins for the parallel bus, which conflicted with I2C pins on some configurations. The combination required two separate boards worth of complexity to do something one TFT could do better.
 
-**What we did instead:** We dropped both the OLED and the LCD and replaced them with a single 4" ST7796S TFT on the SPI bus of the Master board. The TFT eliminated pin conflicts (SPI uses dedicated hardware pins), provided a much larger canvas for information display, and enabled touch input. Arduino 2 was simplified to only read the DHT11 and respond to I2C requests — a clean, single-purpose design.
+**What we did instead:** We dropped both the OLED and the LCD and replaced them with a single 4" ILI9486 TFT on the SPI bus of the Master board. The TFT eliminated pin conflicts (SPI uses dedicated hardware pins), provided a much larger canvas for information display, and enabled touch input. Arduino 2 was simplified to only read the DHT11 and respond to I2C requests — a clean, single-purpose design.
 
 ---
 
@@ -575,7 +575,7 @@ This section documents the significant design ideas explored during development,
 | Week 3 | Initial server prototype (`room_server.py`) with Google Calendar API polling; `/dates` and `/slot` endpoints working; tested from laptop |
 | Week 4 | Arduino 1 WiFi + HTTPS client working; Master can fetch `/slot` and parse availability string; bi-color LED basic control on Wing boards |
 | Week 5 | OLED + LCD display design explored; 128×64 QR code generation attempted and rejected (too small, no room selection UI); LCD scrolling room list implemented and later rejected |
-| Week 6 | TFT touch screen design adopted; `User_Setup.h` configured for ST7796S; TFT rendering of room list working; touch input mapped to rows |
+| Week 6 | TFT touch screen design adopted; `User_Setup.h` configured for ILI9486; TFT rendering of room list working; touch input mapped to rows |
 | Week 7 | On-device QR code generation via `qrcode` library; version 9 ECC_LOW selected; GCAL_URLS array moved to flash; QR scan tested on phone |
 | Week 8 | DHT11 moved from Master to Arduino 2 (I2C slave protocol); 4-byte packet with XOR checksum; temperature/humidity shown in TFT header |
 | Week 9 | Wing A LDR auto-brightness; Wing B HC-SR04 proximity dimming; non-blocking buzzer state machine; all three buttons debounced |
@@ -590,7 +590,7 @@ This section documents the significant design ideas explored during development,
 |-----------|----------|-------|
 | Arduino R4 WiFi | 1 | Master Node; built-in 2.4 GHz WiFi |
 | Arduino UNO R3 | 3 | Env Node, Wing A, Wing B |
-| Hosyond 4.0" 480×320 TFT LCD | 1 | ST7796S driver + XPT2046 touch, SPI interface |
+| Hosyond 4.0" 480×320 TFT LCD | 1 | ILI9486 driver + XPT2046 touch, SPI interface |
 | DHT11 temperature & humidity sensor | 1 | Env Node (Arduino 2) |
 | Bi-color LED (red/green, common cathode) | 8 | 5 for Wing A, 3 for Wing B |
 | 220 Ω resistor | 8 | LED current limiting (one per LED) |
@@ -660,8 +660,8 @@ This section documents the significant design ideas explored during development,
 10. **QR Code Capacity Reference**
     Thonky. *QR Code Tutorial — Data Capacity.* https://www.thonky.com/qr-code-tutorial/data-encoding
 
-11. **ST7796S TFT Datasheet**
-    Sitronix. *ST7796S TFT-LCD Single Chip Driver Datasheet.* (Available from display module vendor)
+11. **ILI9486 TFT Datasheet**
+    ILITEK. *ILI9486 a-Si TFT LCD Single Chip Driver Datasheet.* (Available from display module vendor)
 
 12. **HC-SR04 Ultrasonic Sensor Datasheet**
     Generic. *HC-SR04 Product Datasheet.* https://cdn.sparkfun.com/datasheets/Sensors/Proximity/HCSR04.pdf
