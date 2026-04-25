@@ -152,6 +152,10 @@ enum DispState
 DispState dispState = DISP_NORMAL;
 unsigned long lastTouchTime = 0;
 const unsigned long TOUCH_COOLDOWN = 500UL; // ms between accepted touches
+// After any QR ↔ Normal transition, block all touches until the finger
+// physically leaves the screen.  Prevents one tap from firing two actions
+// (e.g. "dismiss QR" immediately re-booking the same room).
+bool touchMustRelease = false;
 
 // ── Slot data cache ───────────────────────────────────────────────────────────
 // Avoids a network round-trip on every button press.
@@ -476,9 +480,22 @@ void drawContentStatus(uint16_t bg, const char *bigLine, const char *smallLine =
 
 void handleTouch()
 {
-  if (pendingRefresh) return;   // block all touch input while a server refresh is in progress
-  if (!ts.touched())
+  if (pendingRefresh) return;
+
+  bool isTouched = ts.touched();
+
+  // Wait-for-release guard: after any QR↔Normal transition, ignore all
+  // touches until the finger physically leaves the screen.  This prevents
+  // the "dismiss QR" tap from immediately re-booking the same room because
+  // the finger is still down when the new screen renders.
+  if (touchMustRelease)
+  {
+    if (!isTouched) touchMustRelease = false;
     return;
+  }
+
+  if (!isTouched) return;
+
   unsigned long now = millis();
   if (now - lastTouchTime < TOUCH_COOLDOWN)
     return;
@@ -494,9 +511,10 @@ void handleTouch()
 
   if (dispState == DISP_QR)
   {
-    // Any tap on QR screen → return to room list
+    // Any tap on QR screen → return to room list; require finger lift first.
     dispState = DISP_NORMAL;
     drawNormalScreen();
+    touchMustRelease = true;
     return;
   }
 
@@ -509,6 +527,7 @@ void handleTouch()
       Serial.println(ROOM_NAMES[row]);
       dispState = DISP_QR;
       drawQRScreen(row);
+      touchMustRelease = true;   // require finger lift before next action
     }
   }
 }
