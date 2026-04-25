@@ -366,14 +366,24 @@ void drawNormalScreen()
 // QR screen: full-screen QR code pointing to a room's Google Calendar page
 void drawQRScreen(int roomIdx)
 {
-  // Version 9, ECC_LOW → max 154 bytes; our ~143-char URLs fit comfortably.
-  // Buffer for V9: ceil(53×53 / 8) + 1 = 353 bytes; 400 is a safe upper bound.
-  uint8_t qrData[400];
+  // Version 10, ECC_LOW → max 174 bytes; our ~140-char URLs fit with margin.
+  // Buffer for V10: ceil(57×57 / 8) = 407 bytes; 450 is a safe upper bound.
+  // Declared static to keep it in global memory instead of the stack —
+  // avoids stack pressure on the R4 WiFi where SSL/TFT already use most SRAM.
+  static uint8_t qrData[450];
   QRCode qrc;
-  if (!qrcode_initText(&qrc, qrData, 9, ECC_LOW, GCAL_URLS[roomIdx]))
+  if (!qrcode_initText(&qrc, qrData, 10, ECC_LOW, GCAL_URLS[roomIdx]))
   {
+    // Generation failed: show error briefly then return to the room list.
+    // Without resetting dispState here, every subsequent touch would re-trigger
+    // drawQRScreen causing a continuous flicker loop.
     tft.fillScreen(COL_BG);
-    tftCenter("QR Error: URL too long", SCREEN_H / 2, 2, TFT_RED, COL_BG);
+    tftCenter("QR Error", SCREEN_H / 2 - 20, 4, TFT_RED, COL_BG);
+    tftCenter("Could not generate QR code", SCREEN_H / 2 + 16, 2, COL_TAKEN_FG, COL_BG);
+    unsigned long t = millis();
+    while (millis() - t < 2000) {}
+    dispState = DISP_NORMAL;
+    drawNormalScreen();
     return;
   }
 
@@ -385,8 +395,9 @@ void drawQRScreen(int roomIdx)
   snprintf(hdr, sizeof(hdr), "Room %s  -  Scan to Book", ROOM_NAMES[roomIdx]);
   tftCenter(hdr, 13, 2, COL_TITLE, COL_HDR_BG);
 
-  // Centre QR in the space between header (44 px) and footer (28 px)
-  const int SCALE = 4; // 53 × 4 = 212 px wide
+  // Centre QR in the space between header (44 px) and footer (28 px).
+  // SCALE=4 → V10 57×4 = 228 px wide, fits in the 448 px available height zone.
+  const int SCALE = 4;
   const int QR_PX = (int)qrc.size * SCALE;
   const int AVAIL = SCREEN_H - 44 - 28;
   const int xOff = (SCREEN_W - QR_PX) / 2;
