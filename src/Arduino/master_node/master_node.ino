@@ -50,7 +50,6 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <TFT_eSPI.h>
-#include <XPT2046_Touchscreen.h>
 #include <qrcode.h>
 
 // ── WiFi & server ─────────────────────────────────────────────────────────────
@@ -69,19 +68,15 @@ const int SERVER_PORT = 443;                          // HTTPS via Tailscale Fun
 #define BTN2 5
 #define BTN3 6
 #define BUZZER_PIN 8
-#define TOUCH_CS A1 // XPT2046 chip-select (digital pin 15 on R4)
 
-// ── TFT & touch objects ───────────────────────────────────────────────────────
-// Physical pins are declared in User_Setup.h; TFT_eSPI reads that file.
+// ── TFT object ───────────────────────────────────────────────────────────────
+// Touch is handled by TFT_eSPI's built-in XPT2046 driver (no separate library).
+// TOUCH_CS pin is declared in User_Setup.h (pin 15 / A1).
 TFT_eSPI tft;
-XPT2046_Touchscreen ts(TOUCH_CS);
 
-// Touch calibration – run the TFT_eSPI Touch_calibrate example sketch once
-// to find your panel's true min/max ADC values and update these four defines.
-#define TS_MINX 200
-#define TS_MAXX 3800
-#define TS_MINY 200
-#define TS_MAXY 3800
+// Touch calibration data – obtained by running the TFT_eSPI Touch_calibrate
+// example and recording the five values it prints.  Re-run if touch feels off.
+static const uint16_t TOUCH_CAL[5] = { 277, 3647, 219, 3577, 7 };
 
 // ── Colours (RGB565) ──────────────────────────────────────────────────────────
 #define COL_BG 0x0000       // black
@@ -370,20 +365,28 @@ void drawNormalScreen()
 // QR screen: full-screen QR code pointing to a room's Google Calendar page
 void drawQRScreen(int roomIdx)
 {
-  // Version 10, ECC_LOW → max 174 bytes; our ~140-char URLs fit with margin.
-  // Buffer for V10: ceil(57×57 / 8) = 407 bytes; 450 is a safe upper bound.
-  // Declared static to keep it in global memory instead of the stack —
-  // avoids stack pressure on the R4 WiFi where SSL/TFT already use most SRAM.
-  static uint8_t qrData[450];
-  QRCode qrc;
-  if (!qrcode_initText(&qrc, qrData, 10, ECC_LOW, GCAL_URLS[roomIdx]))
+  // ── Step 1: loading screen ────────────────────────────────────────────────
+  tft.fillScreen(COL_BG);
+  tft.fillRect(0, 0, SCREEN_W, 44, COL_HDR_BG);
+  char hdr[32];
+  snprintf(hdr, sizeof(hdr), "Room %s  -  Scan to Book", ROOM_NAMES[roomIdx]);
+  tftCenter(hdr, 13, 2, COL_TITLE, COL_HDR_BG);
+  tftCenter("Getting booking link...", SCREEN_H / 2 - 10, 2, COL_DATE, COL_BG);
+  tftCenter("Please wait", SCREEN_H / 2 + 14, 2, COL_TAKEN_FG, COL_BG);
+
+  // ── Step 2: ask server for a short booking code ───────────────────────────
+  // /newbook returns a 6-char alphanumeric code (e.g. "A1B2C3").
+  // The phone then opens /b/<CODE> which shows a mobile booking page
+  // with a direct link to the room's Google Calendar appointment page.
+  String path = String("/newbook?date=") + dateList[dateIdx]
+                + "&time=" + SLOT_PARAMS[slotIdx];
+  String code = httpGet(path);
+  code.trim();
+
+  if (code.length() < 4)
   {
-    // Generation failed: show error briefly then return to the room list.
-    // Without resetting dispState here, every subsequent touch would re-trigger
-    // drawQRScreen causing a continuous flicker loop.
     tft.fillScreen(COL_BG);
-    tftCenter("QR Error", SCREEN_H / 2 - 20, 4, TFT_RED, COL_BG);
-    tftCenter("Could not generate QR code", SCREEN_H / 2 + 16, 2, COL_TAKEN_FG, COL_BG);
+    tftCenter("Server error", SCREEN_H / 2, 4, TFT_RED, COL_BG);
     unsigned long t = millis();
     while (millis() - t < 2000) {}
     dispState = DISP_NORMAL;
@@ -391,40 +394,52 @@ void drawQRScreen(int roomIdx)
     return;
   }
 
-  tft.fillScreen(COL_BG);
+  // ── Step 3: build short URL (~45 chars) ──────────────────────────────────
+  // e.g. "https://zz-cloud.tail6b9dfa.ts.net/b/A1B2C3"
+  // This comfortably fits in QR Version 3, ECC_LOW (53-byte capacity).
+  char shortUrl[80];
+  snprintf(shortUrl, sizeof(shortUrl), "https://%s/b/%s", SERVER_IP, code.c_str());
 
-  // Header
+  // ── Step 4: generate QR ───────────────────────────────────────────────────
+  // Version 3 (29×29 modules) → buffer = ceil(29²/8) = 106 bytes.
+  // Declared static to avoid stack pressure.
+  static uint8_t qrData[112];
+  QRCode qrc;
+  if (!qrcode_initText(&qrc, qrData, 3, ECC_LOW, shortUrl))
+  {
+    tft.fillScreen(COL_BG);
+    tftCenter("QR Error", SCREEN_H / 2, 4, TFT_RED, COL_BG);
+    unsigned long t = millis();
+    while (millis() - t < 2000) {}
+    dispState = DISP_NORMAL;
+    drawNormalScreen();
+    return;
+  }
+
+  // ── Step 5: draw QR code ──────────────────────────────────────────────────
+  tft.fillScreen(COL_BG);
   tft.fillRect(0, 0, SCREEN_W, 44, COL_HDR_BG);
-  char hdr[32];
-  snprintf(hdr, sizeof(hdr), "Room %s  -  Scan to Book", ROOM_NAMES[roomIdx]);
   tftCenter(hdr, 13, 2, COL_TITLE, COL_HDR_BG);
 
-  // Centre QR in the space between header (44 px) and footer (28 px).
-  // SCALE=4 → V10 57×4 = 228 px wide, fits in the 448 px available height zone.
-  const int SCALE = 4;
+  // Scale QR to fill available space (header 44 px, footer 28 px).
+  // For V3 (size=29): AVAIL_H=248 → scale=8 → 232×232 px QR (large & easy to scan).
+  const int AVAIL_H = SCREEN_H - 44 - 28;
+  const int AVAIL_W = SCREEN_W - 16;
+  int SCALE = min(AVAIL_W / (int)qrc.size, AVAIL_H / (int)qrc.size);
+  if (SCALE < 1) SCALE = 1;
   const int QR_PX = (int)qrc.size * SCALE;
-  const int AVAIL = SCREEN_H - 44 - 28;
   const int xOff = (SCREEN_W - QR_PX) / 2;
-  const int yOff = 44 + (AVAIL - QR_PX) / 2;
+  const int yOff = 44 + (AVAIL_H - QR_PX) / 2;
 
-  // White quiet-zone background
   tft.fillRect(xOff - 8, yOff - 8, QR_PX + 16, QR_PX + 16, TFT_WHITE);
 
-  // Dark modules
   tft.startWrite();
   for (int row = 0; row < (int)qrc.size; row++)
-  {
     for (int col = 0; col < (int)qrc.size; col++)
-    {
       if (qrcode_getModule(&qrc, col, row))
-      {
         tft.fillRect(xOff + col * SCALE, yOff + row * SCALE, SCALE, SCALE, TFT_BLACK);
-      }
-    }
-  }
   tft.endWrite();
 
-  // Footer
   tftCenter("Tap anywhere to return", SCREEN_H - 22, 2, COL_TAKEN_FG, COL_BG);
 }
 
@@ -482,7 +497,10 @@ void handleTouch()
 {
   if (pendingRefresh) return;
 
-  bool isTouched = ts.touched();
+  // tft.getTouch() applies the stored calibration and returns true screen
+  // coordinates (0–479, 0–319) directly – no manual map() needed.
+  uint16_t tx, ty;
+  bool isTouched = tft.getTouch(&tx, &ty);
 
   // Wait-for-release guard: after any QR↔Normal transition, ignore all
   // touches until the finger physically leaves the screen.  This prevents
@@ -501,9 +519,6 @@ void handleTouch()
     return;
   lastTouchTime = now;
 
-  TS_Point p = ts.getPoint();
-  int tx = constrain(map(p.x, TS_MINX, TS_MAXX, 0, SCREEN_W - 1), 0, SCREEN_W - 1);
-  int ty = constrain(map(p.y, TS_MINY, TS_MAXY, 0, SCREEN_H - 1), 0, SCREEN_H - 1);
   Serial.print(F("[Touch] "));
   Serial.print(tx);
   Serial.print(',');
@@ -685,8 +700,8 @@ void setup()
   tft.setRotation(1); // landscape: 480 wide × 320 tall
   tft.fillScreen(COL_BG);
 
-  // Touch controller – shares the same SPI bus
-  ts.begin();
+  // Touch – TFT_eSPI built-in driver; apply calibration data.
+  tft.setTouch(const_cast<uint16_t*>(TOUCH_CAL));
 
   drawSplash("CDRLC Monitor", "Starting up...");
 
