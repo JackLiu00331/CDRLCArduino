@@ -655,6 +655,49 @@ void applySlotData(const char *data)
   if (dispState == DISP_NORMAL) drawNormalScreen();
 }
 
+// Prefetch all 8 time slots for every available date in one pass.
+// Uses the /allslots endpoint: one HTTP request per date (max 5 requests)
+// instead of 40 individual /slot calls.  After this returns, every
+// cachedSlots[d][s] entry is populated and all navigation is instant.
+// Also resets the 5-minute auto-refresh timer.
+void prefetchAllDates()
+{
+  for (int d = 0; d < numDates; d++)
+  {
+    // Progress overlay ─ keep header visible so user sees which date is loading
+    drawHeaderWithBadge("loading...", COL_DATE);
+    char sub[20];
+    snprintf(sub, sizeof(sub), "%d / %d", d + 1, numDates);
+    drawContentStatus(COL_TAKEN_BG, datePretty[d], sub);
+
+    String resp = httpGet(String("/allslots?date=") + dateList[d]);
+    Serial.print(F("[Prefetch] ")); Serial.print(dateList[d]);
+    Serial.print(F("  len=")); Serial.println(resp.length());
+
+    if (resp.length() < 8) continue;   // network error for this date – skip
+
+    // Parse comma-separated 8-char slot strings into the cache
+    // Format: "10010100,11111111,00010000,..." (8 entries, 71 chars total)
+    int pos = 0;
+    for (int s = 0; s < NUM_SLOTS; s++)
+    {
+      int comma = resp.indexOf(',', pos);
+      String tok = (comma < 0) ? resp.substring(pos) : resp.substring(pos, comma);
+      tok.trim();
+      if (tok.length() == 8)
+      {
+        strncpy(cachedSlots[d][s], tok.c_str(), 8);
+        cachedSlots[d][s][8] = '\0';
+        slotCached[d][s] = true;
+      }
+      if (comma < 0) break;
+      pos = comma + 1;
+    }
+  }
+  lastAutoFetch = millis();   // reset 5-min timer after full prefetch
+  Serial.println(F("[Prefetch] Done — all slots cached"));
+}
+
 void fetchAndDisplay()
 {
   if (numDates == 0) return;
@@ -791,9 +834,9 @@ void setup()
   readDHT11();
   lastDHTRead = millis();
 
-  drawSplash("Loading...", "Getting availability");
   fetchDates();
-  fetchAndDisplay(); // first data fetch → shows its own loading overlay then drawNormalScreen()
+  prefetchAllDates();   // load all dates × all slots → all navigation instant after this
+  fetchAndDisplay();    // cache hit → applies slot data and draws normal screen
 }
 
 void loop()
@@ -831,10 +874,9 @@ void loop()
   if (pendingRefresh && now - refreshStart >= REFRESH_WAIT_MS)
   {
     pendingRefresh = false;
-    drawHeaderWithBadge("loading...", COL_DATE);
-    drawContentStatus(COL_TAKEN_BG, "Getting availability...", "Please wait");
     fetchDates();
-    fetchAndDisplay();
+    prefetchAllDates();   // reload all dates × all slots
+    fetchAndDisplay();    // cache hit → instant display update
   }
 
   // BTN3 – advance to next available date
@@ -860,11 +902,12 @@ void loop()
       drawNormalScreen();
   }
 
-  // Auto-refresh every 5 minutes
-  // Only invalidate current slot so other cached slots stay fast.
+  // Auto-refresh every 5 minutes: reload all dates × all slots so every
+  // cached entry stays fresh.  prefetchAllDates() also resets lastAutoFetch.
   if (now - lastAutoFetch >= AUTO_FETCH_MS)
   {
-    slotCached[dateIdx][slotIdx] = false;
-    fetchAndDisplay();
+    memset(slotCached, false, sizeof(slotCached));
+    prefetchAllDates();
+    fetchAndDisplay();    // cache hit → updates display with fresh data
   }
 }

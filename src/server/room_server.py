@@ -521,6 +521,17 @@ class Handler(BaseHTTPRequestHandler):
                 lines.append("\n")
             self.reply("".join(lines))
 
+        # ── /allslots?date=YYYYMMDD  (Arduino bulk prefetch) ───────────────
+        elif path == "/allslots":
+            d = params.get("date", "")
+            if len(d) != 8:
+                self.reply("ERR: need ?date=YYYYMMDD", 400)
+                return
+            # Return all 8 time slots as comma-separated 8-char strings.
+            # e.g. "10010100,11111111,00000000,11110000,11111100,11111110,11111111,11111111"
+            # Arduino parses this in one pass — 5 requests covers all 40 slots.
+            self.reply(",".join(get_slot_string(d, label) for label in SLOT_LABELS))
+
         # ── /newbook?date=YYYYMMDD&time=HHMM  (Arduino) ────────────────────
         elif path == "/newbook":
             d = params.get("date", "")
