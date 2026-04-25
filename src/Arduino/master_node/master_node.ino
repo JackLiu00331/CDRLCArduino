@@ -21,9 +21,12 @@
     0x0A  Arduino 4                                                                           : Wing B LEDs  (rooms 2426 2428 2430)
 
   Pin assignments:
+    D2   HC-SR04 Trig  (proximity sensor – screen auto-dim)
+    D3   TFT Backlight (PWM – brightness control)
     D4   Button 1 – next time slot
     D5   Button 2 – manual server refresh
     D6   Button 3 – next date
+    D7   HC-SR04 Echo  (proximity sensor – screen auto-dim)
     D8   Passive buzzer
     D9   TFT RST
     D10  TFT CS
@@ -34,6 +37,16 @@
     A1   XPT2046 Touch CS        [= digital pin 15 on R4]
     A4   I2C SDA
     A5   I2C SCL
+
+  HC-SR04 wiring:
+    VCC  → 5V
+    GND  → GND
+    Trig → D2
+    Echo → D7
+
+  TFT backlight wiring:
+    TFT BL pin → D3  (do NOT tie BL to 3.3V/5V directly)
+    Dim when nobody within 100 cm, full brightness when someone approaches.
 
   Libraries (install via Arduino Library Manager):
     TFT_eSPI            by Bodmer
@@ -64,10 +77,19 @@ const int SERVER_PORT = 443;                          // HTTPS via Tailscale Fun
 #define SLAVE_WING_B 0x0A // Arduino 4 – Wing B bi-color LEDs
 
 // ── Pins ──────────────────────────────────────────────────────────────────────
-#define BTN1 4
-#define BTN2 5
-#define BTN3 6
+#define TRIG_PIN   2   // HC-SR04 trigger
+#define TFT_BL_PIN 3   // TFT backlight (PWM)
+#define BTN1       4
+#define BTN2       5
+#define BTN3       6
+#define ECHO_PIN   7   // HC-SR04 echo
 #define BUZZER_PIN 8
+
+// ── Backlight / proximity ─────────────────────────────────────────────────────
+#define BL_BRIGHT          255   // full brightness (someone nearby)
+#define BL_DIM              30   // dim brightness  (nobody nearby)
+#define PRESENCE_DIST_CM   100   // threshold: ≤ 100 cm → full brightness
+#define DIST_CHECK_MS      200   // how often to poll the sensor (ms)
 
 // ── TFT object ───────────────────────────────────────────────────────────────
 // Touch is handled by TFT_eSPI's built-in XPT2046 driver (no separate library).
@@ -164,6 +186,10 @@ char todayDate[9] = "";   // "YYYYMMDD", e.g. "20260425"
 char cachedSlots[5][8][9];
 bool slotCached[5][8];     // zero-initialised (all false) by default
 
+// ── Backlight state ───────────────────────────────────────────────────────────
+int  currentBL      = BL_BRIGHT;
+unsigned long lastDistCheck = 0;
+
 // ── Button debounce ───────────────────────────────────────────────────────────
 unsigned long btnTime[3] = {0, 0, 0};
 const unsigned long DEBOUNCE = 200UL;
@@ -205,6 +231,33 @@ void buzzerUpdate()
   else if (buzzState == BUZZ_NOTE2 && now - buzzStart >= 400)
   {
     buzzState = BUZZ_IDLE;
+  }
+}
+
+// ── HC-SR04 proximity → backlight ─────────────────────────────────────────────
+long readDistanceCm() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30 ms timeout
+  if (duration == 0) return 999;                  // out of range → treat as no one
+  return duration / 58L;
+}
+
+void updateBacklight() {
+  unsigned long now = millis();
+  if (now - lastDistCheck < DIST_CHECK_MS) return;
+  lastDistCheck = now;
+
+  long dist   = readDistanceCm();
+  int  target = (dist <= PRESENCE_DIST_CM) ? BL_BRIGHT : BL_DIM;
+  if (target != currentBL) {
+    currentBL = target;
+    analogWrite(TFT_BL_PIN, currentBL);
+    Serial.print(F("[BL] dist=")); Serial.print(dist);
+    Serial.print(F("cm  brightness=")); Serial.println(currentBL);
   }
 }
 
@@ -777,6 +830,10 @@ void setup()
   pinMode(BTN1, INPUT_PULLUP);
   pinMode(BTN2, INPUT_PULLUP);
   pinMode(BTN3, INPUT_PULLUP);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(TFT_BL_PIN, OUTPUT);
+  analogWrite(TFT_BL_PIN, BL_BRIGHT);  // full brightness at startup
 
   // TFT – pin mapping is in User_Setup.h
   tft.init();
@@ -851,6 +908,7 @@ void loop()
 {
   unsigned long now = millis();
 
+  updateBacklight();
   buzzerUpdate();
   handleTouch();
 
