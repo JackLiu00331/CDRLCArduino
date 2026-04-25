@@ -12,6 +12,7 @@ services:
       - TZ=America/Chicago
     volumes:
       - ./schedule.json:/app/schedule.json:ro
+      - ./day_snapshot.json:/app/day_snapshot.json   # persists across rebuilds
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8080/dates')"]
