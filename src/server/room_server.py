@@ -313,7 +313,7 @@ class Handler(BaseHTTPRequestHandler):
         # ── /allslots?date=YYYYMMDD  (Arduino bulk prefetch) ────────────────
         elif path == "/allslots":
             d = params.get("date", "")
-            if len(d) != 8:
+            if len(d) != 8 or not d.isdigit():
                 self.reply("ERR: need ?date=YYYYMMDD", 400)
                 return
             # All 8 slots comma-separated: "10010100,11111111,..."  (~71 chars)
