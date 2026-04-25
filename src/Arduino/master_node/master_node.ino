@@ -152,6 +152,11 @@ const unsigned long TOUCH_COOLDOWN = 500UL; // ms between accepted touches
 // (e.g. "dismiss QR" immediately re-booking the same room).
 bool touchMustRelease = false;
 
+// ── Today's date (set after NTP sync in setup) ───────────────────────────────
+// Used to detect when the displayed date is today (snapshot mode):
+// free rooms show "Free" instead of "Book >" and tapping is disabled.
+char todayDate[9] = "";   // "YYYYMMDD", e.g. "20260425"
+
 // ── Slot data cache ───────────────────────────────────────────────────────────
 // Avoids a network round-trip on every button press.
 // cachedSlots[dateIdx][slotIdx] = 8-char status string ("10010100")
@@ -328,6 +333,10 @@ void drawNormalScreen()
     tft.drawString(fs, SCREEN_W - w - 10, 32, 2);
   }
 
+  // Is the displayed date today?  If so show "Free" (no booking) instead of "Book >"
+  bool showingToday = (todayDate[0] != '\0' && numDates > 0 &&
+                       strcmp(dateList[dateIdx], todayDate) == 0);
+
   // ── Room rows  (8 × ROW_H = 264 px; HEADER_H + 264 = 320) ───────────────
   for (int i = 0; i < 8; i++)
   {
@@ -345,20 +354,37 @@ void drawNormalScreen()
     tft.drawString(label, 16, y + (ROW_H - 16) / 2, 2);
 
     // Status pill – right-aligned
-    const char *tag = roomFree[i] ? "Book >" : "Taken";
-    int tw = tft.textWidth(tag, 2);
-    int px = SCREEN_W - 92 + (82 - tw) / 2;
+    // Today's free rooms: show "Free" as plain text (no interactive button).
+    // Other days' free rooms: show "Book >" inside a tappable white pill.
     int py = y + (ROW_H - 16) / 2;
-    if (roomFree[i])
+    if (roomFree[i] && !showingToday)
     {
+      // Interactive "Book >" pill
+      const char *tag = "Book >";
+      int tw = tft.textWidth(tag, 2);
+      int px = SCREEN_W - 92 + (82 - tw) / 2;
       tft.fillRoundRect(SCREEN_W - 92, y + 6, 82, ROW_H - 13, 7, COL_FREE_FG);
       tft.setTextColor(COL_FREE_BG, COL_FREE_FG);
+      tft.drawString(tag, px, py, 2);
+    }
+    else if (roomFree[i] && showingToday)
+    {
+      // Today's snapshot: free but can't book — plain "Free" label in accent green
+      const char *tag = "Free";
+      int tw = tft.textWidth(tag, 2);
+      int px = SCREEN_W - 92 + (82 - tw) / 2;
+      tft.setTextColor(COL_ACCENT, COL_FREE_BG);
+      tft.drawString(tag, px, py, 2);
     }
     else
     {
+      // Taken room
+      const char *tag = "Taken";
+      int tw = tft.textWidth(tag, 2);
+      int px = SCREEN_W - 92 + (82 - tw) / 2;
       tft.setTextColor(COL_TAKEN_FG, COL_TAKEN_BG);
+      tft.drawString(tag, px, py, 2);
     }
-    tft.drawString(tag, px, py, 2);
   }
 }
 
@@ -523,7 +549,12 @@ void handleTouch()
     return;
   }
 
-  if (dispState == DISP_NORMAL && ty >= HEADER_H)
+  // Don't allow booking taps when showing today's snapshot data —
+  // Google Calendar blocks same-day booking so a QR would be useless.
+  bool showingToday = (todayDate[0] != '\0' && numDates > 0 &&
+                       strcmp(dateList[dateIdx], todayDate) == 0);
+
+  if (dispState == DISP_NORMAL && ty >= HEADER_H && !showingToday)
   {
     int row = (ty - HEADER_H) / ROW_H;
     if (row >= 0 && row < 8 && roomFree[row])
@@ -586,10 +617,21 @@ void fetchDates()
       break;
     start = comma + 1;
   }
-  dateIdx = (numDates > 1) ? 1 : 0;
+  // Pick the default date:
+  //   Mon–Thu (NTP day 1–4): today is dateList[0] but is all-blocked by Google;
+  //                           default to index 1 (tomorrow).
+  //   Fri–Sun (NTP day 5,6,0): today is NOT in the list; the list starts from
+  //                             next Monday, so index 0 is already the best default.
+  // timeClient.getDay() → 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat
+  int dow = timeClient.getDay();
+  bool todayInList = (dow >= 1 && dow <= 4);   // Mon–Thu
+  dateIdx = (numDates > 1 && todayInList) ? 1 : 0;
+
+  Serial.print(F("[Dates] got ")); Serial.print(numDates);
+  Serial.print(F("  dow=")); Serial.print(dow);
+  Serial.print(F("  dateIdx=")); Serial.println(dateIdx);
+
   memset(slotCached, false, sizeof(slotCached));  // date list changed → invalidate all
-  Serial.print(F("[Dates] got "));
-  Serial.println(numDates);
 }
 
 // Apply a slot data string to LEDs and TFT (shared by cache-hit and network paths).
@@ -734,6 +776,17 @@ void setup()
 
   timeClient.begin();
   timeClient.update();
+
+  // Compute today's date string ("YYYYMMDD") from the NTP-adjusted epoch.
+  // getEpochTime() already applies the UTC offset (-18000 = CDT/UTC-5),
+  // so gmtime() gives the correct local date components.
+  {
+    time_t t = timeClient.getEpochTime();
+    struct tm *ptm = gmtime(&t);
+    snprintf(todayDate, sizeof(todayDate), "%04d%02d%02d",
+             ptm->tm_year + 1900, ptm->tm_mon + 1, ptm->tm_mday);
+    Serial.print(F("[Date] Today: ")); Serial.println(todayDate);
+  }
 
   readDHT11();
   lastDHTRead = millis();

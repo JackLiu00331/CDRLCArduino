@@ -138,12 +138,21 @@ def save_day_snapshot():
 
 def valid_dates() -> list[str]:
     """
-    Fix 3 – Weekend-aware date list:
-      Mon–Thu  →  remaining weekdays of current week (today through Friday)
-      Fri–Sun  →  all of next week (Monday through Friday)
+    Date list rules:
 
-    On any weekday, today is included in the list even though Google blocks
-    same-day booking; /slot serves the day snapshot in that case (Fix 2).
+      Mon–Thu  →  today through Friday of this week (2–5 dates).
+                  Today is included even though Google blocks same-day booking;
+                  /slot falls back to the day snapshot saved the evening before
+                  (Fix 2), so the display still shows meaningful data.
+
+      Friday   →  today (served from Thursday's snapshot via Fix 2)
+                  + next Monday through Thursday (4 days).
+                  Total: 5 dates.  Dropping next Friday keeps the list at 5
+                  so the Arduino's dateList[5] array is never overflowed.
+
+      Sat–Sun  →  all of next week, Monday through Friday (5 dates).
+                  No snapshot needed — these are all future dates that the
+                  server fetches fresh from Google Calendar.
     """
     today = datetime.now(CHICAGO_TZ).date()
     dow   = today.weekday()          # 0=Mon … 4=Fri, 5=Sat, 6=Sun
@@ -155,9 +164,15 @@ def valid_dates() -> list[str]:
             for i in range(5)
             if monday + timedelta(days=i) >= today
         ]
-    else:                             # Fri–Sun: all of next week
-        days_ahead    = (7 - dow) % 7 or 7
-        next_monday   = today + timedelta(days=days_ahead)
+    elif dow == 4:                    # Friday: today (snapshot) + next Mon–Thu
+        next_monday = today + timedelta(days=3)
+        return (
+            [today.strftime("%Y%m%d")] +
+            [(next_monday + timedelta(days=i)).strftime("%Y%m%d") for i in range(4)]
+        )
+    else:                             # Sat–Sun: all of next week
+        days_ahead  = (7 - dow) % 7 or 7
+        next_monday = today + timedelta(days=days_ahead)
         return [(next_monday + timedelta(days=i)).strftime("%Y%m%d") for i in range(5)]
 
 
