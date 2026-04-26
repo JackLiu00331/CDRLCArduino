@@ -33,11 +33,17 @@
   TM1637 wiring:
     VCC → 5V,  GND → GND,  CLK → D3,  DIO → D4
 
-  74HC595 + 1-digit 7-seg wiring (common cathode):
-    74HC595 QA–QG → 7-seg segments a–g
-    74HC595 QH    → 7-seg dp (decimal point, unused)
-    7-seg common cathode → GND (via 220Ω resistor)
+  74HC595 + 5161AS 1-digit 7-seg wiring (COMMON ANODE):
+    74HC595 QA (pin15) → 220Ω → 5161AS pin7 (a)
+    74HC595 QB (pin 1) → 220Ω → 5161AS pin6 (b)
+    74HC595 QC (pin 2) → 220Ω → 5161AS pin4 (c)
+    74HC595 QD (pin 3) → 220Ω → 5161AS pin2 (d)
+    74HC595 QE (pin 4) → 220Ω → 5161AS pin1 (e)
+    74HC595 QF (pin 5) → 220Ω → 5161AS pin9 (f)
+    74HC595 QG (pin 6) → 220Ω → 5161AS pin10(g)
+    5161AS COM (pin3 & pin8) → 5V   ← 共阳极接高电平
     74HC595 VCC/MR → 5V,  GND/OE → GND
+    NOTE: common anode → segment ON when output is LOW (active-low)
 
   Libraries required:
     DHT sensor library  by Adafruit
@@ -75,18 +81,21 @@ volatile bool    newDisplayData = false;
 
 unsigned long lastRead = 0;
 
-// ── 7-segment digit patterns (common cathode, Q0=a Q1=b Q2=c Q3=d Q4=e Q5=f Q6=g)
+// ── 7-segment digit patterns for 5161AS COMMON ANODE ─────────────────────────
+// Wiring: QA→a, QB→b, QC→c, QD→d, QE→e, QF→f, QG→g  (shiftOut LSBFIRST)
+// Common anode: segment lights when output is LOW → patterns are bit-inverted
+// vs. common-cathode.  ~commonCathode & 0xFF gives the correct value.
 const uint8_t SEG7[10] = {
-  0x3F,  // 0
-  0x06,  // 1
-  0x5B,  // 2
-  0x4F,  // 3
-  0x66,  // 4
-  0x6D,  // 5
-  0x7D,  // 6
-  0x07,  // 7
-  0x7F,  // 8
-  0x6F,  // 9
+  0xC0,  // 0  (~0x3F)
+  0xF9,  // 1  (~0x06)
+  0xA4,  // 2  (~0x5B)
+  0xB0,  // 3  (~0x4F)
+  0x99,  // 4  (~0x66)
+  0x92,  // 5  (~0x6D)
+  0x82,  // 6  (~0x7D)
+  0xF8,  // 7  (~0x07)
+  0x80,  // 8  (~0x7F)
+  0x90,  // 9  (~0x6F)
 };
 
 // ── 4 digits for each of the 8 time slots ────────────────────────────────────
@@ -185,7 +194,7 @@ void tm_showDash() {
 
 void hc_shift(uint8_t segments) {
   digitalWrite(HC_LATCH, LOW);
-  shiftOut(HC_DATA, HC_CLK, MSBFIRST, segments);
+  shiftOut(HC_DATA, HC_CLK, LSBFIRST, segments);  // LSBFIRST: bit0→QA→seg-a
   digitalWrite(HC_LATCH, HIGH);
 }
 
@@ -236,7 +245,7 @@ void setup() {
 
   // Startup placeholder display
   tm_showDash();         // 4-digit: "----"
-  hc_shift(0x40);        // 1-digit: middle dash
+  hc_shift(0xBF);        // 1-digit: middle dash (g only, common-anode: ~0x40)
 
   dht.begin();
   delay(2000);           // DHT11 warm-up
