@@ -975,10 +975,14 @@ void loop()
 {
   unsigned long now = millis();
 
-  // Read LDR and update cached LED brightness for both wings
+  // Read LDR → LED brightness for both wings.
+  // Calibrated range:
+  //   102  = finger pressed on sensor (darkest)  → brightness 40
+  //   375  = dim bedroom (micro-light)            → brightness ~120
+  //   850  = flashlight direct                   → brightness 255
   {
     int ldr = analogRead(LDR_PIN);
-    ledBrightness = (uint8_t)constrain(map(ldr, 100, 900, 40, 255), 40, 255);
+    ledBrightness = (uint8_t)constrain(map(ldr, 102, 850, 40, 255), 40, 255);
   }
 
   updateBacklight();
