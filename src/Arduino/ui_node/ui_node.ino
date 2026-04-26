@@ -1,18 +1,17 @@
 /*
   ================================================================
-  Arduino 2 – Environment & Display Node  v3.0
+  Arduino 2 – Environment & Display Node  v3.1
   CDRLC Study Room Availability Monitor
   ================================================================
   Responsibilities:
     - Read DHT11 temperature & humidity every 2 seconds
-    - Drive TM1637 4-digit display  → current time slot (e.g. 09:30)
-    - Drive 74HC595 + 1-digit 7-seg → free room count for that slot
+    - Drive 74HC595 + 5161AS 1-digit 7-seg → free room count (0–8)
     - I2C Slave at address 0x08
 
   I2C protocol:
     Master → this node  (Wire.write, 2 bytes):
-      byte 0 : freeCount   (0–8, number of free rooms)
-      byte 1 : slotIdx     (0–7, index into time-slot table)
+      byte 0 : freeCount  (0–8, number of free rooms in current slot)
+      byte 1 : slotIdx    (0–7, reserved for future use)
 
     Master ← this node  (Wire.requestFrom(0x08, 4)):
       byte 0 : temperature integer part  (°C, e.g. 22)
@@ -22,33 +21,30 @@
 
   Wiring:
     D2   DHT11 data line (10 kΩ pull-up to 5 V)
-    D3   TM1637 CLK
-    D4   TM1637 DIO
-    D5   74HC595 DS   (serial data)
+    D5   74HC595 DS   (serial data in)
     D6   74HC595 SHCP (shift clock)
     D7   74HC595 STCP (latch)
     A4   I2C SDA  (shared bus with Arduinos 1, 3, 4)
     A5   I2C SCL
 
-  TM1637 wiring:
-    VCC → 5V,  GND → GND,  CLK → D3,  DIO → D4
+  74HC595 + 5161AS wiring (COMMON ANODE):
+    74HC595 QA (pin15) → 220Ω → 5161AS pin7  (segment a)
+    74HC595 QB (pin 1) → 220Ω → 5161AS pin6  (segment b)
+    74HC595 QC (pin 2) → 220Ω → 5161AS pin4  (segment c)
+    74HC595 QD (pin 3) → 220Ω → 5161AS pin2  (segment d)
+    74HC595 QE (pin 4) → 220Ω → 5161AS pin1  (segment e)
+    74HC595 QF (pin 5) → 220Ω → 5161AS pin9  (segment f)
+    74HC595 QG (pin 6) → 220Ω → 5161AS pin10 (segment g)
+    5161AS COM (pin3 & pin8) → 5V   ← common anode
+    74HC595 VCC / MR → 5V,  GND / OE → GND
 
-  74HC595 + 5161AS 1-digit 7-seg wiring (COMMON ANODE):
-    74HC595 QA (pin15) → 220Ω → 5161AS pin7 (a)
-    74HC595 QB (pin 1) → 220Ω → 5161AS pin6 (b)
-    74HC595 QC (pin 2) → 220Ω → 5161AS pin4 (c)
-    74HC595 QD (pin 3) → 220Ω → 5161AS pin2 (d)
-    74HC595 QE (pin 4) → 220Ω → 5161AS pin1 (e)
-    74HC595 QF (pin 5) → 220Ω → 5161AS pin9 (f)
-    74HC595 QG (pin 6) → 220Ω → 5161AS pin10(g)
-    5161AS COM (pin3 & pin8) → 5V   ← 共阳极接高电平
-    74HC595 VCC/MR → 5V,  GND/OE → GND
-    NOTE: common anode → segment ON when output is LOW (active-low)
+  5161AS pin layout (facing front, decimal point bottom-right):
+    Bottom L→R : 1(e)  2(d)  3(COM)  4(c)  5(dp)
+    Top    R→L : 6(b)  7(a)  8(COM)  9(f) 10(g)
 
   Libraries required:
     DHT sensor library  by Adafruit
     (Adafruit Unified Sensor installs automatically as a dependency)
-    TM1637 is bit-banged manually — no library needed.
   ================================================================
 */
 
@@ -58,14 +54,12 @@
 // ── Pin assignments ───────────────────────────────────────────────────────────
 #define SLAVE_ADDR   0x08
 #define DHT_PIN      2
-#define TM_CLK       3    // TM1637 clock
-#define TM_DIO       4    // TM1637 data
 #define HC_DATA      5    // 74HC595 DS   (serial data in)
 #define HC_CLK       6    // 74HC595 SHCP (shift register clock)
-#define HC_LATCH     7    // 74HC595 STCP (storage register clock / latch)
+#define HC_LATCH     7    // 74HC595 STCP (storage register / latch)
 
-#define DHT_TYPE       DHT11
-#define READ_INTERVAL  2000UL   // DHT11 minimum safe poll interval
+#define DHT_TYPE      DHT11
+#define READ_INTERVAL 2000UL   // DHT11 minimum safe poll interval
 
 DHT dht(DHT_PIN, DHT_TYPE);
 
@@ -74,133 +68,36 @@ volatile uint8_t tInt  = 0;
 volatile uint8_t tFrac = 0;
 volatile uint8_t hInt  = 0;
 
-// ── Display state (written in I2C ISR, read in loop) ─────────────────────────
+// ── Display state (written in I2C ISR, consumed in loop) ─────────────────────
 volatile uint8_t dispFreeCount  = 0;
-volatile uint8_t dispSlotIdx    = 0;
 volatile bool    newDisplayData = false;
 
 unsigned long lastRead = 0;
 
-// ── 7-segment digit patterns for 5161AS COMMON ANODE ─────────────────────────
-// Wiring: QA→a, QB→b, QC→c, QD→d, QE→e, QF→f, QG→g  (shiftOut LSBFIRST)
-// Common anode: segment lights when output is LOW → patterns are bit-inverted
-// vs. common-cathode.  ~commonCathode & 0xFF gives the correct value.
+// ── 5161AS common-anode digit patterns ───────────────────────────────────────
+// Wiring: bit0→QA→a, bit1→QB→b, ..., bit6→QG→g  (shiftOut LSBFIRST)
+// Common anode: segment ON when output LOW → all bits inverted vs common cathode
 const uint8_t SEG7[10] = {
-  0xC0,  // 0  (~0x3F)
-  0xF9,  // 1  (~0x06)
-  0xA4,  // 2  (~0x5B)
-  0xB0,  // 3  (~0x4F)
-  0x99,  // 4  (~0x66)
-  0x92,  // 5  (~0x6D)
-  0x82,  // 6  (~0x7D)
-  0xF8,  // 7  (~0x07)
-  0x80,  // 8  (~0x7F)
-  0x90,  // 9  (~0x6F)
+  0xC0,  // 0
+  0xF9,  // 1
+  0xA4,  // 2
+  0xB0,  // 3
+  0x99,  // 4
+  0x92,  // 5
+  0x82,  // 6
+  0xF8,  // 7
+  0x80,  // 8
+  0x90,  // 9
 };
 
-// ── 4 digits for each of the 8 time slots ────────────────────────────────────
-// Format: {d0, d1, d2, d3} → displays as "d0 d1 : d2 d3"
-// (colon bit is set automatically on d1)
-const uint8_t SLOT_DIGITS[8][4] = {
-  {0, 9, 3, 0},  // 09:30
-  {1, 0, 3, 0},  // 10:30
-  {1, 1, 3, 0},  // 11:30
-  {1, 2, 3, 0},  // 12:30
-  {1, 3, 3, 0},  // 13:30
-  {1, 4, 3, 0},  // 14:30
-  {1, 5, 3, 0},  // 15:30
-  {1, 6, 3, 0},  // 16:30
-};
-
-// ══════════════════════════════════════════════════════════════════════════════
-// TM1637 bit-bang driver
-// Protocol: I2C-like but NOT compatible with Wire — must be bit-banged.
-// ══════════════════════════════════════════════════════════════════════════════
-
-void tm_start() {
-  digitalWrite(TM_DIO, HIGH);
-  digitalWrite(TM_CLK, HIGH);
-  delayMicroseconds(2);
-  digitalWrite(TM_DIO, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TM_CLK, LOW);
-}
-
-void tm_stop() {
-  digitalWrite(TM_CLK, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TM_DIO, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TM_CLK, HIGH);
-  delayMicroseconds(2);
-  digitalWrite(TM_DIO, HIGH);
-}
-
-// Send one byte LSB-first; wait for ACK pulse.
-void tm_writeByte(uint8_t b) {
-  for (int i = 0; i < 8; i++) {
-    digitalWrite(TM_CLK, LOW);
-    digitalWrite(TM_DIO, (b >> i) & 0x01 ? HIGH : LOW);
-    delayMicroseconds(2);
-    digitalWrite(TM_CLK, HIGH);
-    delayMicroseconds(2);
-  }
-  // ACK: TM1637 pulls DIO low for one clock pulse
-  digitalWrite(TM_CLK, LOW);
-  pinMode(TM_DIO, INPUT);       // release DIO so TM1637 can pull it
-  delayMicroseconds(2);
-  digitalWrite(TM_CLK, HIGH);
-  delayMicroseconds(2);
-  digitalWrite(TM_CLK, LOW);
-  pinMode(TM_DIO, OUTPUT);      // reclaim DIO
-}
-
-// Write 4 digits to TM1637 with colon on (bit 7 of digit 1).
-// brightness: 0 (min) – 7 (max)
-void tm_show(uint8_t d0, uint8_t d1, uint8_t d2, uint8_t d3, uint8_t brightness) {
-  // Command 1: data write, auto-increment address
-  tm_start();
-  tm_writeByte(0x40);
-  tm_stop();
-
-  // Command 2: set start address 0x00, write all 4 digits
-  tm_start();
-  tm_writeByte(0xC0);
-  tm_writeByte(SEG7[d0]);
-  tm_writeByte(SEG7[d1] | 0x80);   // 0x80 = colon on
-  tm_writeByte(SEG7[d2]);
-  tm_writeByte(SEG7[d3]);
-  tm_stop();
-
-  // Command 3: display on + brightness (0x88 = on, | brightness 0–7)
-  tm_start();
-  tm_writeByte(0x88 | (brightness & 0x07));
-  tm_stop();
-}
-
-// Show "----" on TM1637 (used during startup before data arrives)
-void tm_showDash() {
-  tm_start(); tm_writeByte(0x40); tm_stop();
-  tm_start();
-  tm_writeByte(0xC0);
-  for (int i = 0; i < 4; i++) tm_writeByte(0x40);  // 0x40 = middle dash segment
-  tm_stop();
-  tm_start(); tm_writeByte(0x8F); tm_stop();   // on, max brightness
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 74HC595 + 1-digit 7-segment driver
-// ══════════════════════════════════════════════════════════════════════════════
-
+// ── 74HC595 driver ────────────────────────────────────────────────────────────
 void hc_shift(uint8_t segments) {
   digitalWrite(HC_LATCH, LOW);
-  shiftOut(HC_DATA, HC_CLK, LSBFIRST, segments);  // LSBFIRST: bit0→QA→seg-a
+  shiftOut(HC_DATA, HC_CLK, LSBFIRST, segments);  // bit0→QA→segment-a
   digitalWrite(HC_LATCH, HIGH);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// I2C handlers
-// ══════════════════════════════════════════════════════════════════════════════
+// ── I2C handlers ──────────────────────────────────────────────────────────────
 
 // Master reads DHT11 data from us
 void requestEvent() {
@@ -211,44 +108,32 @@ void requestEvent() {
   Wire.write(chk);
 }
 
-// Master sends display data to us: [freeCount, slotIdx]
+// Master sends display data: [freeCount, slotIdx]
 void receiveEvent(int numBytes) {
   if (numBytes >= 2) {
     uint8_t fc = Wire.read();
-    uint8_t si = Wire.read();
-    while (Wire.available()) Wire.read();   // discard any extra bytes
-    if (si < 8) {
-      dispFreeCount  = fc;
-      dispSlotIdx    = si;
-      newDisplayData = true;
-    }
+    Wire.read();                       // slotIdx – not used for 1-digit display
+    while (Wire.available()) Wire.read();
+    dispFreeCount  = fc;
+    newDisplayData = true;
   } else {
     while (Wire.available()) Wire.read();
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Setup & Loop
-// ══════════════════════════════════════════════════════════════════════════════
+// ── Setup & Loop ──────────────────────────────────────────────────────────────
 
 void setup() {
   Serial.begin(9600);
 
-  // 74HC595
   pinMode(HC_DATA,  OUTPUT);
   pinMode(HC_CLK,   OUTPUT);
   pinMode(HC_LATCH, OUTPUT);
 
-  // TM1637
-  pinMode(TM_CLK, OUTPUT);
-  pinMode(TM_DIO, OUTPUT);
-
-  // Startup placeholder display
-  tm_showDash();         // 4-digit: "----"
-  hc_shift(0xBF);        // 1-digit: middle dash (g only, common-anode: ~0x40)
+  hc_shift(0xBF);   // startup: show middle dash (g segment only, ~0x40)
 
   dht.begin();
-  delay(2000);           // DHT11 warm-up
+  delay(2000);      // DHT11 warm-up
 
   Wire.begin(SLAVE_ADDR);
   Wire.onRequest(requestEvent);
@@ -259,21 +144,13 @@ void setup() {
 
 
 void loop() {
-  // Update both displays when master sends new slot/count data
+  // Update 7-seg when master sends new free-count
   if (newDisplayData) {
     newDisplayData = false;
-
-    uint8_t si = dispSlotIdx;
-    tm_show(SLOT_DIGITS[si][0], SLOT_DIGITS[si][1],
-            SLOT_DIGITS[si][2], SLOT_DIGITS[si][3], 7);
-
     uint8_t fc = dispFreeCount < 10 ? dispFreeCount : 9;
     hc_shift(SEG7[fc]);
-
-    Serial.print(F("[DISP] slot="));
-    Serial.print(si);
-    Serial.print(F("  free="));
-    Serial.println(dispFreeCount);
+    Serial.print(F("[DISP] free rooms = "));
+    Serial.println(fc);
   }
 
   // DHT11 read every 2 seconds
