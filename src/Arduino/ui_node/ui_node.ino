@@ -24,7 +24,7 @@
     A4   I2C SDA
     A5   I2C SCL
 
-  5161AS (common anode) direct wiring – each segment via 220Ω:
+  5161AS (common cathode) direct wiring – each segment via 220Ω:
     Arduino D3  → 220Ω → pin7  (segment a – top)
     Arduino D4  → 220Ω → pin6  (segment b – top-right)
     Arduino D5  → 220Ω → pin4  (segment c – bottom-right)
@@ -32,7 +32,7 @@
     Arduino D7  → 220Ω → pin1  (segment e – bottom-left)
     Arduino D8  → 220Ω → pin9  (segment f – top-left)
     Arduino D9  → 220Ω → pin10 (segment g – middle)
-    5161AS COM  pin3 & pin8 → 5V  (common anode)
+    5161AS COM  pin3 & pin8 → GND  (common cathode)
 
   5161AS pin layout (facing front, decimal point bottom-right):
     Bottom L→R : 1(e)  2(d)  3(COM)  4(c)  5(dp)
@@ -69,8 +69,8 @@ volatile bool    newDisplayData = false;
 
 unsigned long lastRead = 0;
 
-// ── 5161AS common-anode segment patterns [digit][a,b,c,d,e,f,g] ──────────────
-// true = segment ON (Arduino outputs LOW for common anode)
+// ── 5161AS common-cathode segment patterns [digit][a,b,c,d,e,f,g] ────────────
+// true = segment ON (Arduino outputs HIGH for common cathode)
 const bool SEG7[10][7] = {
   {1,1,1,1,1,1,0},  // 0
   {0,1,1,0,0,0,0},  // 1
@@ -89,13 +89,13 @@ const bool SEG7[10][7] = {
 void showDigit(uint8_t n) {
   if (n > 9) n = 9;
   for (int i = 0; i < 7; i++)
-    digitalWrite(SEG_PINS[i], SEG7[n][i] ? LOW : HIGH);  // common anode: ON=LOW
+    digitalWrite(SEG_PINS[i], SEG7[n][i] ? HIGH : LOW);  // common cathode: ON=HIGH
 }
 
 void showDash() {
   // Only middle segment (g) on — used as startup placeholder
-  for (int i = 0; i < 6; i++) digitalWrite(SEG_PINS[i], HIGH);
-  digitalWrite(SEG_PINS[6], LOW);   // g = on
+  for (int i = 0; i < 6; i++) digitalWrite(SEG_PINS[i], LOW);
+  digitalWrite(SEG_PINS[6], HIGH);  // g = on
 }
 
 // ── I2C handlers ──────────────────────────────────────────────────────────────
@@ -127,7 +127,7 @@ void setup() {
 
   for (int i = 0; i < 7; i++) {
     pinMode(SEG_PINS[i], OUTPUT);
-    digitalWrite(SEG_PINS[i], HIGH);   // all segments off (common anode)
+    digitalWrite(SEG_PINS[i], LOW);    // all segments off (common cathode)
   }
   showDash();   // startup placeholder
 
