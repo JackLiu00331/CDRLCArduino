@@ -85,10 +85,16 @@ void receiveEvent(int numBytes) {
 void updateLEDs(uint8_t status, int brightness) {
   for (int i = 0; i < NUM_ROOMS; i++) {
     bool booked = (status >> i) & 0x01;
-    // 红色引脚均为非PWM脚（D2 D4 D7 D8 D11），必须用 digitalWrite
-    // 绿色引脚均为PWM脚（D3 D5 D6 D9 D10），用 analogWrite 实现调光
-    digitalWrite(LED_PINS[i][1], booked  ? HIGH : LOW);        // 红
-    analogWrite (LED_PINS[i][0], booked  ? 0    : brightness); // 绿
+    if (brightness == 0) {
+      // Screen is off (sleep mode) → extinguish ALL LEDs including red
+      digitalWrite(LED_PINS[i][1], LOW);
+      analogWrite (LED_PINS[i][0], 0);
+    } else {
+      // 红色引脚均为非PWM脚（D2 D4 D7 D8 D11），必须用 digitalWrite
+      // 绿色引脚均为PWM脚（D3 D5 D6 D9 D10），用 analogWrite 实现调光
+      digitalWrite(LED_PINS[i][1], booked  ? HIGH : LOW);        // 红
+      analogWrite (LED_PINS[i][0], booked  ? 0    : brightness); // 绿
+    }
   }
 }
 
