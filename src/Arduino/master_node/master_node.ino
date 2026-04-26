@@ -35,8 +35,13 @@
     D13  SPI SCK
     A0   TFT DC (Data/Command)   [= digital pin 14 on R4]
     A1   XPT2046 Touch CS        [= digital pin 15 on R4]
+    A2   LDR (photoresistor) – ambient light → LED brightness for all wings
     A4   I2C SDA
     A5   I2C SCL
+
+  LDR wiring (voltage divider):
+    LDR one end → 5V
+    LDR other end → A2  AND  → 10kΩ → GND
 
   HC-SR04 wiring:
     VCC  → 5V
@@ -79,6 +84,7 @@ const int SERVER_PORT = 443;                          // HTTPS via Tailscale Fun
 // ── Pins ──────────────────────────────────────────────────────────────────────
 #define TRIG_PIN   2   // HC-SR04 trigger
 #define TFT_BL_PIN 3   // TFT backlight (PWM)
+#define LDR_PIN    A2  // photoresistor (ambient light → LED brightness)
 #define BTN1       4
 #define BTN2       5
 #define BTN3       6
@@ -189,6 +195,9 @@ char todayDate[9] = "";   // "YYYYMMDD", e.g. "20260425"
 // slotCached[dateIdx][slotIdx]  = true once that slot has been fetched.
 char cachedSlots[5][8][9];
 bool slotCached[5][8];     // zero-initialised (all false) by default
+
+// ── LED brightness (read from LDR, sent to both wings via I2C) ───────────────
+uint8_t ledBrightness = 200;          // cached value, updated every loop tick
 
 // ── Backlight state ───────────────────────────────────────────────────────────
 int           currentBL     = BL_FULL;
@@ -303,13 +312,16 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", -18000, 60000);
 // I2C helpers
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Send 3-byte packet to a Wing LED slave: [ctrl, data, ctrl^data]
+// Send 4-byte packet to a Wing LED slave:
+//   [ctrl, data, brightness, ctrl^data^brightness]
+// Wings use brightness to drive analogWrite on green LED pins.
 void sendI2C(uint8_t addr, uint8_t ctrl, uint8_t data)
 {
   Wire.beginTransmission(addr);
   Wire.write(ctrl);
   Wire.write(data);
-  Wire.write(ctrl ^ data);
+  Wire.write(ledBrightness);
+  Wire.write(ctrl ^ data ^ ledBrightness);
   Wire.endTransmission();
 }
 
@@ -962,6 +974,12 @@ void setup()
 void loop()
 {
   unsigned long now = millis();
+
+  // Read LDR and update cached LED brightness for both wings
+  {
+    int ldr = analogRead(LDR_PIN);
+    ledBrightness = (uint8_t)constrain(map(ldr, 100, 900, 40, 255), 40, 255);
+  }
 
   updateBacklight();
   buzzerUpdate();

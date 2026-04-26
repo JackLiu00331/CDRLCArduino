@@ -6,10 +6,14 @@
   负责房间：2426  2428  2430（共3个）
 
   I2C 角色：Slave，地址 0x0A
-  接收 1字节状态（低3位有效）：
-    bit 0 = 房间 2426   (0=可预约绿灯, 1=已预约红灯)
-    bit 1 = 房间 2428
-    bit 2 = 房间 2430
+  接收 4字节数据包（master_node 发送）：
+    byte 0 : ctrl       = 0x01
+    byte 1 : status     低3位有效
+               bit 0 = 房间 2426   (0=可预约绿灯, 1=已预约红灯)
+               bit 1 = 房间 2428
+               bit 2 = 房间 2430
+    byte 2 : brightness  LED 亮度 (40–255)，由 master 的光敏电阻决定
+    byte 3 : checksum   = byte0 ^ byte1 ^ byte2
 
   引脚分配：
     D2  房间 2426 红
@@ -43,8 +47,9 @@ const int LED_PINS[NUM_ROOMS][2] = {
   {6, 7},   // bit2 → 房间 2430  绿=D6(PWM) 红=D7
 };
 
-volatile uint8_t roomStatus = 0x00;
-volatile bool    newData    = false;
+volatile uint8_t roomStatus    = 0x00;
+volatile uint8_t ledBrightness = 200;    // updated by master via I2C
+volatile bool    newData       = false;
 
 unsigned long lastUpdate = 0;
 const unsigned long UPDATE_INTERVAL = 200UL;
@@ -52,13 +57,15 @@ const unsigned long UPDATE_INTERVAL = 200UL;
 
 // ── I2C 接收 ──────────────────────────────────────────────────────────────────
 void receiveEvent(int numBytes) {
-  if (numBytes == 3) {
+  if (numBytes == 4) {
     uint8_t ctrl = Wire.read();
     uint8_t data = Wire.read();
+    uint8_t bri  = Wire.read();
     uint8_t chk  = Wire.read();
-    if ((ctrl ^ data) == chk && ctrl == 0x01) {
-      roomStatus = data;
-      newData    = true;
+    if ((ctrl ^ data ^ bri) == chk && ctrl == 0x01) {
+      roomStatus    = data;
+      ledBrightness = bri;
+      newData       = true;
     }
   } else {
     while (Wire.available()) Wire.read();
@@ -98,5 +105,5 @@ void loop() {
   lastUpdate = now;
 
   if (newData) newData = false;
-  updateLEDs(roomStatus, 200);  // 固定亮度
+  updateLEDs(roomStatus, ledBrightness);  // 亮度由 master LDR 决定
 }
