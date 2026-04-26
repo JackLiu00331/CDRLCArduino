@@ -268,7 +268,9 @@ void markActive() {
   if (currentBL != BL_FULL) {
     currentBL = BL_FULL;
     analogWrite(TFT_BL_PIN, BL_FULL);
-    Serial.println(F("[BL] wake → full brightness"));
+    // Wake wing LEDs at the same time the screen lights up
+    sendI2C(SLAVE_WING_A, 0x01, prevStatusA);
+    sendI2C(SLAVE_WING_B, 0x01, prevStatusB);
   }
 }
 
@@ -314,14 +316,15 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", -18000, 60000);
 
 // Send 4-byte packet to a Wing LED slave:
 //   [ctrl, data, brightness, ctrl^data^brightness]
-// Wings use brightness to drive analogWrite on green LED pins.
+// brightness = 0 when screen is off (BL_OFF) so LEDs sleep with the screen.
 void sendI2C(uint8_t addr, uint8_t ctrl, uint8_t data)
 {
+  uint8_t bri = (currentBL == BL_OFF) ? 0 : ledBrightness;
   Wire.beginTransmission(addr);
   Wire.write(ctrl);
   Wire.write(data);
-  Wire.write(ledBrightness);
-  Wire.write(ctrl ^ data ^ ledBrightness);
+  Wire.write(bri);
+  Wire.write(ctrl ^ data ^ bri);
   Wire.endTransmission();
 }
 
@@ -891,7 +894,7 @@ bool btnPressed(int pin, int idx)
 
 void setup()
 {
-  Serial.begin(9600);
+  Serial.begin(115200);
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(BTN1, INPUT_PULLUP);
   pinMode(BTN2, INPUT_PULLUP);
@@ -981,8 +984,16 @@ void loop()
   //   375  = dim bedroom (micro-light)            → brightness ~120
   //   850  = flashlight direct                   → brightness 255
   {
+    static unsigned long lastBrightnessSync = 0;
     int ldr = analogRead(LDR_PIN);
     ledBrightness = (uint8_t)constrain(map(ldr, 102, 850, 40, 255), 40, 255);
+    // Resend brightness + screen-state to both wings every second so LED
+    // brightness tracks the LDR, and LEDs go dark when the screen sleeps.
+    if (now - lastBrightnessSync >= 1000) {
+      lastBrightnessSync = now;
+      sendI2C(SLAVE_WING_A, 0x01, prevStatusA);
+      sendI2C(SLAVE_WING_B, 0x01, prevStatusB);
+    }
   }
 
   updateBacklight();
