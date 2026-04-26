@@ -313,6 +313,17 @@ void sendI2C(uint8_t addr, uint8_t ctrl, uint8_t data)
   Wire.endTransmission();
 }
 
+// Send 2 bytes to Arduino 2: [freeCount, slotIdx]
+// Arduino 2 drives the TM1637 (time slot) and 74HC595+7-seg (free count).
+void sendDisplayData() {
+  int fc = 0;
+  for (int i = 0; i < 8; i++) if (roomFree[i]) fc++;
+  Wire.beginTransmission(SLAVE_ENV);
+  Wire.write((uint8_t)fc);
+  Wire.write((uint8_t)slotIdx);
+  Wire.endTransmission();
+}
+
 // Request 4 bytes from Arduino 2: [tempInt, tempFrac, humiInt, checksum]
 void readDHT11()
 {
@@ -755,6 +766,7 @@ void applySlotData(const char *data)
   if ((prevStatusA & ~statusA) || (prevStatusB & ~statusB)) buzzerTrigger();
   prevStatusA = statusA;
   prevStatusB = statusB;
+  sendDisplayData();   // update TM1637 (time slot) + 7-seg (free count) on Arduino 2
   if (dispState == DISP_NORMAL) drawNormalScreen();
 }
 
