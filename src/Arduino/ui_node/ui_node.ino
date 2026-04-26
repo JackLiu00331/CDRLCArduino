@@ -1,50 +1,45 @@
 /*
   ================================================================
-  Arduino 2 – Environment & Display Node  v3.1
+  Arduino 2 – Environment & Display Node  v3.2
   CDRLC Study Room Availability Monitor
   ================================================================
   Responsibilities:
     - Read DHT11 temperature & humidity every 2 seconds
-    - Drive 74HC595 + 5161AS 1-digit 7-seg → free room count (0–8)
+    - Drive 5161AS 1-digit 7-seg directly → free room count (0–8)
     - I2C Slave at address 0x08
 
   I2C protocol:
     Master → this node  (Wire.write, 2 bytes):
       byte 0 : freeCount  (0–8, number of free rooms in current slot)
-      byte 1 : slotIdx    (0–7, reserved for future use)
+      byte 1 : slotIdx    (reserved)
 
     Master ← this node  (Wire.requestFrom(0x08, 4)):
-      byte 0 : temperature integer part  (°C, e.g. 22)
-      byte 1 : temperature fractional    (tenths, e.g. 5 → 22.5 °C)
+      byte 0 : temperature integer part  (°C)
+      byte 1 : temperature fractional    (tenths)
       byte 2 : relative humidity integer (%)
       byte 3 : checksum = byte0 ^ byte1 ^ byte2
 
   Wiring:
     D2   DHT11 data line (10 kΩ pull-up to 5 V)
-    D5   74HC595 DS   (serial data in)
-    D6   74HC595 SHCP (shift clock)
-    D7   74HC595 STCP (latch)
-    A4   I2C SDA  (shared bus with Arduinos 1, 3, 4)
+    A4   I2C SDA
     A5   I2C SCL
 
-  74HC595 + 5161AS wiring (COMMON ANODE):
-    74HC595 QA (pin15) → 220Ω → 5161AS pin7  (segment a)
-    74HC595 QB (pin 1) → 220Ω → 5161AS pin6  (segment b)
-    74HC595 QC (pin 2) → 220Ω → 5161AS pin4  (segment c)
-    74HC595 QD (pin 3) → 220Ω → 5161AS pin2  (segment d)
-    74HC595 QE (pin 4) → 220Ω → 5161AS pin1  (segment e)
-    74HC595 QF (pin 5) → 220Ω → 5161AS pin9  (segment f)
-    74HC595 QG (pin 6) → 220Ω → 5161AS pin10 (segment g)
-    5161AS COM (pin3 & pin8) → 5V   ← common anode
-    74HC595 VCC / MR → 5V,  GND / OE → GND
+  5161AS (common anode) direct wiring – each segment via 220Ω:
+    Arduino D3  → 220Ω → pin7  (segment a – top)
+    Arduino D4  → 220Ω → pin6  (segment b – top-right)
+    Arduino D5  → 220Ω → pin4  (segment c – bottom-right)
+    Arduino D6  → 220Ω → pin2  (segment d – bottom)
+    Arduino D7  → 220Ω → pin1  (segment e – bottom-left)
+    Arduino D8  → 220Ω → pin9  (segment f – top-left)
+    Arduino D9  → 220Ω → pin10 (segment g – middle)
+    5161AS COM  pin3 & pin8 → 5V  (common anode)
 
   5161AS pin layout (facing front, decimal point bottom-right):
     Bottom L→R : 1(e)  2(d)  3(COM)  4(c)  5(dp)
     Top    R→L : 6(b)  7(a)  8(COM)  9(f) 10(g)
 
   Libraries required:
-    DHT sensor library  by Adafruit
-    (Adafruit Unified Sensor installs automatically as a dependency)
+    DHT sensor library by Adafruit
   ================================================================
 */
 
@@ -52,54 +47,59 @@
 #include <DHT.h>
 
 // ── Pin assignments ───────────────────────────────────────────────────────────
-#define SLAVE_ADDR   0x08
-#define DHT_PIN      2
-#define HC_DATA      5    // 74HC595 DS   (serial data in)
-#define HC_CLK       6    // 74HC595 SHCP (shift register clock)
-#define HC_LATCH     7    // 74HC595 STCP (storage register / latch)
+#define SLAVE_ADDR    0x08
+#define DHT_PIN       2
+
+// 7-segment pins in segment order: a, b, c, d, e, f, g
+const int SEG_PINS[7] = { 3, 4, 5, 6, 7, 8, 9 };
 
 #define DHT_TYPE      DHT11
-#define READ_INTERVAL 2000UL   // DHT11 minimum safe poll interval
+#define READ_INTERVAL 2000UL
 
 DHT dht(DHT_PIN, DHT_TYPE);
 
-// ── DHT11 readings (written in loop, read in I2C ISR) ────────────────────────
+// ── DHT11 readings ────────────────────────────────────────────────────────────
 volatile uint8_t tInt  = 0;
 volatile uint8_t tFrac = 0;
 volatile uint8_t hInt  = 0;
 
-// ── Display state (written in I2C ISR, consumed in loop) ─────────────────────
+// ── Display state ─────────────────────────────────────────────────────────────
 volatile uint8_t dispFreeCount  = 0;
 volatile bool    newDisplayData = false;
 
 unsigned long lastRead = 0;
 
-// ── 5161AS common-anode digit patterns ───────────────────────────────────────
-// Wiring: bit0→QA→a, bit1→QB→b, ..., bit6→QG→g  (shiftOut LSBFIRST)
-// Common anode: segment ON when output LOW → all bits inverted vs common cathode
-const uint8_t SEG7[10] = {
-  0xC0,  // 0
-  0xF9,  // 1
-  0xA4,  // 2
-  0xB0,  // 3
-  0x99,  // 4
-  0x92,  // 5
-  0x82,  // 6
-  0xF8,  // 7
-  0x80,  // 8
-  0x90,  // 9
+// ── 5161AS common-anode segment patterns [digit][a,b,c,d,e,f,g] ──────────────
+// true = segment ON (Arduino outputs LOW for common anode)
+const bool SEG7[10][7] = {
+  {1,1,1,1,1,1,0},  // 0
+  {0,1,1,0,0,0,0},  // 1
+  {1,1,0,1,1,0,1},  // 2
+  {1,1,1,1,0,0,1},  // 3
+  {0,1,1,0,0,1,1},  // 4
+  {1,0,1,1,0,1,1},  // 5
+  {1,0,1,1,1,1,1},  // 6
+  {1,1,1,0,0,0,0},  // 7
+  {1,1,1,1,1,1,1},  // 8
+  {1,1,1,1,0,1,1},  // 9
 };
 
-// ── 74HC595 driver ────────────────────────────────────────────────────────────
-void hc_shift(uint8_t segments) {
-  digitalWrite(HC_LATCH, LOW);
-  shiftOut(HC_DATA, HC_CLK, LSBFIRST, segments);  // bit0→QA→segment-a
-  digitalWrite(HC_LATCH, HIGH);
+// ── 7-segment display helpers ─────────────────────────────────────────────────
+
+void showDigit(uint8_t n) {
+  if (n > 9) n = 9;
+  for (int i = 0; i < 7; i++)
+    digitalWrite(SEG_PINS[i], SEG7[n][i] ? LOW : HIGH);  // common anode: ON=LOW
+}
+
+void showDash() {
+  // Only middle segment (g) on — used as startup placeholder
+  for (int i = 0; i < 6; i++) digitalWrite(SEG_PINS[i], HIGH);
+  digitalWrite(SEG_PINS[6], LOW);   // g = on
 }
 
 // ── I2C handlers ──────────────────────────────────────────────────────────────
 
-// Master reads DHT11 data from us
 void requestEvent() {
   uint8_t chk = tInt ^ tFrac ^ hInt;
   Wire.write(tInt);
@@ -108,11 +108,10 @@ void requestEvent() {
   Wire.write(chk);
 }
 
-// Master sends display data: [freeCount, slotIdx]
 void receiveEvent(int numBytes) {
   if (numBytes >= 2) {
     uint8_t fc = Wire.read();
-    Wire.read();                       // slotIdx – not used for 1-digit display
+    Wire.read();                        // slotIdx – reserved
     while (Wire.available()) Wire.read();
     dispFreeCount  = fc;
     newDisplayData = true;
@@ -126,14 +125,14 @@ void receiveEvent(int numBytes) {
 void setup() {
   Serial.begin(9600);
 
-  pinMode(HC_DATA,  OUTPUT);
-  pinMode(HC_CLK,   OUTPUT);
-  pinMode(HC_LATCH, OUTPUT);
-
-  hc_shift(0xBF);   // startup: show middle dash (g segment only, ~0x40)
+  for (int i = 0; i < 7; i++) {
+    pinMode(SEG_PINS[i], OUTPUT);
+    digitalWrite(SEG_PINS[i], HIGH);   // all segments off (common anode)
+  }
+  showDash();   // startup placeholder
 
   dht.begin();
-  delay(2000);      // DHT11 warm-up
+  delay(2000);  // DHT11 warm-up
 
   Wire.begin(SLAVE_ADDR);
   Wire.onRequest(requestEvent);
@@ -147,10 +146,9 @@ void loop() {
   // Update 7-seg when master sends new free-count
   if (newDisplayData) {
     newDisplayData = false;
-    uint8_t fc = dispFreeCount < 10 ? dispFreeCount : 9;
-    hc_shift(SEG7[fc]);
+    showDigit(dispFreeCount);
     Serial.print(F("[DISP] free rooms = "));
-    Serial.println(fc);
+    Serial.println(dispFreeCount);
   }
 
   // DHT11 read every 2 seconds
