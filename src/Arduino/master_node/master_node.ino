@@ -1,65 +1,75 @@
 /*
-  ================================================================
-  Arduino 1 – Master Node  v5.0
   CDRLC Study Room Availability Monitor
-  ================================================================
+  Arduino 1 - Master Node
+
+  Team Members:
+    Delon Bui        dbui9@uic.edu
+    Sean Kim         skim6497@uic.edu
+    Chao Liu         cliu1051@uic.edu
+    Andrew Mikielski amiki@uic.edu
+
   Responsibilities:
-    - Connect to WiFi; poll room availability from the NAS server
-    - Drive a 4" ST7796S TFT touch screen:
-        Normal view  – colour-coded room list (green=free / grey=taken)
-        QR view      – on-device QR code when user taps a free room
-    - On QR tap: user scans QR → Google Calendar booking page opens
-    - Read DHT11 temp/humidity from Arduino 2 via I2C requestFrom
-    - Broadcast LED status to Wing A (0x09) and Wing B (0x0A) over I2C
-    - Drive passive buzzer (two-tone beep when a room becomes free)
-    - Three push buttons: cycle slot / manual refresh / cycle date
+    - Connect to WiFi and poll room availability from the NAS server over HTTPS
+    - Drive a 4" ST7796S TFT touch screen (480x320, landscape):
+        Normal view: color-coded room list (green = free, grey = taken)
+        QR view: full-screen QR code when user taps a free room row
+    - On QR tap: user scans QR with phone → Google Calendar booking page opens
+    - Read DHT11 temperature and humidity from Arduino 2 via I2C requestFrom
+    - Broadcast LED status and ambient brightness to Wing A (0x09) and Wing B (0x0A)
+    - Drive passive buzzer: two-tone beep when a room transitions from booked to free
+    - Three push buttons: cycle time slot / manual server refresh / cycle date
+    - HC-SR04 ultrasonic: proximity-based TFT backlight auto-dim and LED sleep
+    - LDR photoresistor: ambient light level → LED brightness sent to all wing boards
 
   I2C bus:
-    Master (this board) : no address – Wire.begin() with no arg
-    0x08  Arduino 2     : DHT11 sensor – requestFrom(0x08, 4)
-    0x09  Arduino 3     : Wing A LEDs  (rooms 2432 2434 2436 2438 2440)
-    0x0A  Arduino 4     : Wing B LEDs  (rooms 2426 2428 2430)
+    Master (this board): Wire.begin() with no address (master role)
+    0x08  Arduino 2: DHT11 environment sensor, requestFrom(0x08, 4)
+    0x09  Arduino 3: Wing A LEDs (rooms 2432 2434 2436 2438 2440)
+    0x0A  Arduino 4: Wing B LEDs (rooms 2426 2428 2430)
+
+  4-byte I2C write packet to Wing boards [ctrl, status, brightness, checksum]:
+    byte 0: ctrl       = 0x01
+    byte 1: status     bitmask of booked rooms (bit N = 1 → room N booked)
+    byte 2: brightness LED brightness (0 = screen off / LEDs sleep, 40-255 = active)
+    byte 3: checksum   = byte0 ^ byte1 ^ byte2
 
   Pin assignments:
-    D2   HC-SR04 Trig  (proximity sensor – screen auto-dim)
-    D3   TFT Backlight (PWM – brightness control)
-    D4   Button 1 – next time slot
-    D5   Button 2 – manual server refresh
-    D6   Button 3 – next date
-    D7   HC-SR04 Echo  (proximity sensor – screen auto-dim)
+    D2   HC-SR04 Trig  (proximity sensor for screen auto-dim and LED sleep)
+    D3   TFT Backlight (PWM - brightness via analogWrite)
+    D4   Button 1 - advance to next time slot
+    D5   Button 2 - manual server refresh
+    D6   Button 3 - advance to next date
+    D7   HC-SR04 Echo
     D8   Passive buzzer
     D9   TFT RST
     D10  TFT CS
-    D11  SPI MOSI  (TFT + Touch shared bus)
+    D11  SPI MOSI (TFT display)
     D12  SPI MISO
     D13  SPI SCK
-    A0   TFT DC (Data/Command)   [= digital pin 14 on R4]
-    A1   XPT2046 Touch CS        [= digital pin 15 on R4]
-    A2   LDR (photoresistor) – ambient light → LED brightness for all wings
+    A0   TFT DC (Data/Command) [digital pin 14 on R4]
+    A1   XPT2046 Touch CS      [digital pin 15 on R4]
+    A2   LDR (photoresistor) - ambient light → LED brightness for all wings
     A4   I2C SDA
     A5   I2C SCL
 
   LDR wiring (voltage divider):
-    LDR one end → 5V
-    LDR other end → A2  AND  → 10kΩ → GND
+    LDR one end → 5V, other end → A2 AND → 10kOhm → GND
 
   HC-SR04 wiring:
-    VCC  → 5V
-    GND  → GND
-    Trig → D2
-    Echo → D7
+    VCC → 5V, GND → GND, Trig → D2, Echo → D7
 
   TFT backlight wiring:
-    TFT BL pin → D3  (do NOT tie BL to 3.3V/5V directly)
-    Dim when nobody within 100 cm, full brightness when someone approaches.
+    TFT BL pin → D3 (PWM). Do NOT tie BL to 3.3V or 5V directly.
+    Backlight fades from full (255) to dim (40) over 10-13 seconds of idle,
+    then turns fully off at 30 seconds. Any activity (button, touch, proximity)
+    immediately restores full brightness and resets the idle timer.
 
-  Libraries (install via Arduino Library Manager):
+  Libraries required (install via Arduino Library Manager):
     TFT_eSPI            by Bodmer
     XPT2046_Touchscreen by Paul Stoffregen
     qrcode              by ricmoo
     NTPClient           by Fabrice Weinberg
     ArduinoHttpClient   by Arduino
-  ================================================================
 */
 
 #include <Wire.h>
@@ -70,18 +80,18 @@
 #include <TFT_eSPI.h>
 #include <qrcode.h>
 
-// ── WiFi & server ─────────────────────────────────────────────────────────────
+// WiFi and server connection settings
 const char *SSID = "NETGEAR77";                        // ← change to your WiFi SSID
 const char *PASSWORD = "pinkbutter932";                // ← change to your WiFi password
 const char *SERVER_IP = "zz-cloud.tail6b9dfa.ts.net"; // ← Tailscale Funnel hostname
 const int SERVER_PORT = 443;                          // HTTPS via Tailscale Funnel
 
-// ── I2C slave addresses ───────────────────────────────────────────────────────
+// I2C slave addresses
 #define SLAVE_ENV 0x08    // Arduino 2 – DHT11 environment sensor
 #define SLAVE_WING_A 0x09 // Arduino 3 – Wing A bi-color LEDs
 #define SLAVE_WING_B 0x0A // Arduino 4 – Wing B bi-color LEDs
 
-// ── Pins ──────────────────────────────────────────────────────────────────────
+// Pin assignments
 #define TRIG_PIN   2   // HC-SR04 trigger
 #define TFT_BL_PIN 3   // TFT backlight (PWM)
 #define LDR_PIN    A2  // photoresistor (ambient light → LED brightness)
@@ -91,7 +101,7 @@ const int SERVER_PORT = 443;                          // HTTPS via Tailscale Fun
 #define ECHO_PIN   7   // HC-SR04 echo
 #define BUZZER_PIN 8
 
-// ── Backlight / proximity / activity ─────────────────────────────────────────
+// Backlight, proximity detection, and activity timing constants
 #define BL_FULL             255  // active brightness
 #define BL_DIM               40  // idle dim level
 #define BL_OFF                0  // screen off
@@ -101,8 +111,8 @@ const int SERVER_PORT = 443;                          // HTTPS via Tailscale Fun
 #define PRESENCE_DIST_CM    100  // ≤ 100 cm counts as "someone present"
 #define DIST_CHECK_MS       200  // HC-SR04 poll interval (ms)
 
-// ── TFT object ───────────────────────────────────────────────────────────────
-// Touch is handled by TFT_eSPI's built-in XPT2046 driver (no separate library).
+// TFT display object.
+// Touch is handled by TFT_eSPI's built-in XPT2046 driver.
 // TOUCH_CS pin is declared in User_Setup.h (pin 15 / A1).
 TFT_eSPI tft;
 
@@ -110,7 +120,7 @@ TFT_eSPI tft;
 // example and recording the five values it prints.  Re-run if touch feels off.
 static const uint16_t TOUCH_CAL[5] = { 277, 3647, 219, 3577, 7 };
 
-// ── Colours (RGB565) ──────────────────────────────────────────────────────────
+// Color constants (RGB565 format)
 #define COL_BG 0x0000       // black
 #define COL_HDR_BG 0x000F   // very dark navy  (header bar)
 #define COL_FREE_BG 0x03C0  // dark green      (free room row)
@@ -123,20 +133,20 @@ static const uint16_t TOUCH_CAL[5] = { 277, 3647, 219, 3577, 7 };
 #define COL_ACCENT 0x07E0   // bright green    (free-count badge)
 #define COL_ERR_BG 0x4000   // dark red        (error overlay background)
 
-// ── Screen layout  (480×320 landscape after setRotation(1)) ──────────────────
+// Screen layout constants (480x320 landscape after setRotation(1))
 #define SCREEN_W 480
 #define SCREEN_H 320
 #define HEADER_H 56 // header bar height in pixels
 #define ROW_H 33    // room row height  (8 × 33 + 56 = 320 exactly)
 
-// ── Time slots ────────────────────────────────────────────────────────────────
+// Available time slots (labels for display, params for API calls)
 const char *SLOT_LABELS[] = {"09:30", "10:30", "11:30",
                              "12:30", "13:30", "14:30", "15:30", "16:30"};
 const char *SLOT_PARAMS[] = {"0930", "1030", "1130",
                              "1230", "1330", "1430", "1530", "1630"};
 const int NUM_SLOTS = 8;
 
-// ── Room names & Google Calendar booking URLs ─────────────────────────────────
+// Room names and Google Calendar booking URLs.
 // String literals on ARM Cortex-M4 are stored in flash, not SRAM.
 const char ROOM_NAMES[8][5] = {
     "2432", "2434", "2436", "2438", "2440", "2426", "2428", "2430"};
@@ -150,7 +160,7 @@ const char *const GCAL_URLS[8] = {
     "https://calendar.google.com/calendar/appointments/schedules/AcZssZ0p9czIXJNtpMOf5tXBGmslRJMv64NSx_5D7atsWFCoajdv5GvbMZb_k7alyZ5zxU16KJ1Elsr5",
     "https://calendar.google.com/calendar/appointments/schedules/AcZssZ0p9czIXJNtpMOf5tXBGmslRJMv64NSx_5D7atsWFCoajdv5GvbMZb_k7alyZ5zxU16KJ1Elsr5"};
 
-// ── Global state ──────────────────────────────────────────────────────────────
+// Global state variables
 char dateList[5][9];    // "YYYYMMDD"
 char datePretty[5][11]; // "Mon MM/DD"
 int numDates = 0;
@@ -164,13 +174,13 @@ uint8_t prevStatusB = 0xFF;
 unsigned long lastAutoFetch = 0;
 const unsigned long AUTO_FETCH_MS = 300000UL; // 5 minutes
 
-// ── DHT11 data (polled from Arduino 2 via I2C) ────────────────────────────────
+// DHT11 data (polled from Arduino 2 via I2C every 30 seconds)
 float cachedTemp = NAN;
 float cachedHumi = NAN;
 unsigned long lastDHTRead = 0;
 const unsigned long DHT_READ_MS = 30000UL; // re-read every 30 s
 
-// ── Display state machine ─────────────────────────────────────────────────────
+// Display state machine (normal room list or QR code view)
 enum DispState
 {
   DISP_NORMAL,
@@ -184,36 +194,35 @@ const unsigned long TOUCH_COOLDOWN = 500UL; // ms between accepted touches
 // (e.g. "dismiss QR" immediately re-booking the same room).
 bool touchMustRelease = false;
 
-// ── Today's date (set after NTP sync in setup) ───────────────────────────────
+// Today's date string set after NTP sync in setup().
 // Used to detect when the displayed date is today (snapshot mode):
 // free rooms show "Free" instead of "Book >" and tapping is disabled.
 char todayDate[9] = "";   // "YYYYMMDD", e.g. "20260425"
 
-// ── Slot data cache ───────────────────────────────────────────────────────────
-// Avoids a network round-trip on every button press.
+// Slot data cache - avoids a network round-trip on every button press.
 // cachedSlots[dateIdx][slotIdx] = 8-char status string ("10010100")
 // slotCached[dateIdx][slotIdx]  = true once that slot has been fetched.
 char cachedSlots[5][8][9];
 bool slotCached[5][8];     // zero-initialised (all false) by default
 
-// ── LED brightness (read from LDR, sent to both wings via I2C) ───────────────
+// LED brightness - read from LDR on A2, sent to both wings in every I2C packet
 uint8_t ledBrightness = 200;          // cached value, updated every loop tick
 
-// ── Backlight state ───────────────────────────────────────────────────────────
+// TFT backlight state
 int           currentBL     = BL_FULL;
 unsigned long lastActiveTime = 0;   // last time activity was detected
 unsigned long lastDistCheck  = 0;
 
-// ── Button debounce ───────────────────────────────────────────────────────────
+// Button debounce state
 unsigned long btnTime[3] = {0, 0, 0};
 const unsigned long DEBOUNCE = 200UL;
 
-// ── Non-blocking manual refresh (BTN2) ───────────────────────────────────────
+// Non-blocking manual refresh state (triggered by BTN2)
 bool pendingRefresh = false;
 unsigned long refreshStart = 0;
 const unsigned long REFRESH_WAIT_MS = 3000UL;
 
-// ── Non-blocking two-tone buzzer ──────────────────────────────────────────────
+// Non-blocking two-tone buzzer state machine
 enum BuzzState
 {
   BUZZ_IDLE,
@@ -248,7 +257,7 @@ void buzzerUpdate()
   }
 }
 
-// ── HC-SR04 proximity + activity-based backlight ──────────────────────────────
+// HC-SR04 proximity sensing and activity-based backlight management
 
 long readDistanceCm() {
   digitalWrite(TRIG_PIN, LOW);
@@ -310,9 +319,7 @@ void updateBacklight() {
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", -18000, 60000);
 
-// ══════════════════════════════════════════════════════════════════════════════
-// I2C helpers
-// ══════════════════════════════════════════════════════════════════════════════
+// I2C helper functions
 
 // Send 4-byte packet to a Wing LED slave:
 //   [ctrl, data, brightness, ctrl^data^brightness]
@@ -362,9 +369,7 @@ void readDHT11()
   Serial.println('%');
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// HTTP helper (HTTPS via WiFiSSLClient)
-// ══════════════════════════════════════════════════════════════════════════════
+// HTTP helper - HTTPS GET requests via WiFiSSLClient
 
 WiFiSSLClient wifiClient;
 
@@ -393,9 +398,7 @@ String httpGet(const String &path)
   return body;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// TFT drawing
-// ══════════════════════════════════════════════════════════════════════════════
+// TFT drawing functions
 
 // Draw text horizontally centred at Y position
 void tftCenter(const char *txt, int y, uint8_t font,
@@ -423,7 +426,7 @@ void drawNormalScreen()
     if (roomFree[i])
       freeCount++;
 
-  // ── Header bar ────────────────────────────────────────────────────────────
+  // Header bar
   tft.fillRect(0, 0, SCREEN_W, HEADER_H, COL_HDR_BG);
 
   // Top row  →  title (left) + temperature (right)
@@ -459,7 +462,7 @@ void drawNormalScreen()
   bool showingToday = (todayDate[0] != '\0' && numDates > 0 &&
                        strcmp(dateList[dateIdx], todayDate) == 0);
 
-  // ── Room rows  (8 × ROW_H = 264 px; HEADER_H + 264 = 320) ───────────────
+  // Room rows (8 x ROW_H = 264 px; HEADER_H + 264 = 320)
   for (int i = 0; i < 8; i++)
   {
     int y = HEADER_H + i * ROW_H;
@@ -522,7 +525,7 @@ void drawNormalScreen()
 // Never cast the return value to bool. Check qrc.size > 0 instead.
 void drawQRScreen(int roomIdx)
 {
-  // ── Generate QR from Google Calendar URL (instant, no network) ───────────
+  // Generate QR from Google Calendar URL (instant, no network call needed)
   static uint8_t qrData[256];   // V7 needs 254 bytes; 256 gives safe margin
   QRCode qrc;
   qrcode_initText(&qrc, qrData, 7, ECC_LOW, GCAL_URLS[roomIdx]);
@@ -543,7 +546,7 @@ void drawQRScreen(int roomIdx)
     return;
   }
 
-  // ── Header (44 px): room name + date/slot context ────────────────────────
+  // Header bar (44 px): room name and date/slot context
   tft.fillScreen(COL_BG);
   tft.fillRect(0, 0, SCREEN_W, 44, COL_HDR_BG);
 
@@ -558,9 +561,9 @@ void drawQRScreen(int roomIdx)
     tftCenter(sub, 26, 2, COL_DATE, COL_HDR_BG);
   }
 
-  // ── QR code: scale to fill available area ────────────────────────────────
-  // Available: 480×(320-44-28) = 480×248 px.
-  // V7 (size=45): scale = min(480-16/45, 248/45) = min(10,5) = 5 → 225×225 px
+  // QR code: scale to fill available area.
+  // Available: 480x(320-44-28) = 480x248 px.
+  // V7 (size=45): scale = min(480-16/45, 248/45) = min(10,5) = 5 → 225x225 px
   const int AVAIL_H = SCREEN_H - 44 - 28;
   const int AVAIL_W = SCREEN_W - 16;
   int SCALE = min(AVAIL_W / (int)qrc.size, AVAIL_H / (int)qrc.size);
@@ -627,9 +630,7 @@ void drawContentStatus(uint16_t bg, const char *bigLine, const char *smallLine =
     tftCenter(smallLine, y1 + 36, 2, COL_TAKEN_FG, bg);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Touch handler  (called every loop iteration)
-// ══════════════════════════════════════════════════════════════════════════════
+// Touch event handler (called every loop iteration)
 
 void handleTouch()
 {
@@ -697,9 +698,7 @@ void handleTouch()
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Date helpers
-// ══════════════════════════════════════════════════════════════════════════════
+// Date helper functions
 
 const char *dowAbbrev(const char *d)
 {
@@ -719,9 +718,7 @@ void makePretty(const char *d, char *out)
   snprintf(out, 11, "%s %c%c/%c%c", dowAbbrev(d), d[4], d[5], d[6], d[7]);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Data fetch
-// ══════════════════════════════════════════════════════════════════════════════
+// Data fetch functions (network requests and cache management)
 
 void fetchDates()
 {
@@ -832,7 +829,7 @@ void fetchAndDisplay()
 {
   if (numDates == 0) return;
 
-  // ── Cache hit: instant display, no network call ───────────────────────────
+  // Cache hit: instant display, no network call needed
   if (slotCached[dateIdx][slotIdx])
   {
     Serial.print(F("[Cache] ")); Serial.print(dateList[dateIdx]);
@@ -841,8 +838,8 @@ void fetchAndDisplay()
     return;
   }
 
-  // ── Cache miss: show loading state, then fetch ────────────────────────────
-  // Keep the QR view intact if the user is scanning – only update in NORMAL mode.
+  // Cache miss: show loading state, then fetch from server.
+  // Keep the QR view intact if the user is scanning - only update in NORMAL mode.
   if (dispState == DISP_NORMAL)
   {
     drawHeaderWithBadge("loading...", COL_DATE);
@@ -874,9 +871,7 @@ void fetchAndDisplay()
   Serial.print(' '); Serial.println(SLOT_PARAMS[slotIdx]);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Button helper
-// ══════════════════════════════════════════════════════════════════════════════
+// Button debounce helper
 
 bool btnPressed(int pin, int idx)
 {
@@ -888,9 +883,7 @@ bool btnPressed(int pin, int idx)
   return false;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Setup & Loop
-// ══════════════════════════════════════════════════════════════════════════════
+// Arduino setup and main loop
 
 void setup()
 {

@@ -1,52 +1,64 @@
 /*
-  ================================================================
-  Arduino 2 – Environment & Display Node  v3.2
   CDRLC Study Room Availability Monitor
-  ================================================================
+  Arduino 2 - Environment and Display Node
+
+  Team Members:
+    Delon Bui        dbui9@uic.edu
+    Sean Kim         skim6497@uic.edu
+    Chao Liu         cliu1051@uic.edu
+    Andrew Mikielski amiki@uic.edu
+
   Responsibilities:
-    - Read DHT11 temperature & humidity every 2 seconds
-    - Drive 5161AS 1-digit 7-seg directly → free room count (0–8)
-    - I2C Slave at address 0x08
+    - Read DHT11 temperature and humidity every 2 seconds
+    - Drive a 5161AS 1-digit 7-segment display showing the free room count (0-8)
+    - Respond to I2C read requests from the master with temperature and humidity data
 
-  I2C protocol:
-    Master → this node  (Wire.write, 2 bytes):
-      byte 0 : freeCount  (0–8, number of free rooms in current slot)
-      byte 1 : slotIdx    (reserved)
+  I2C role: Slave at address 0x08
 
-    Master ← this node  (Wire.requestFrom(0x08, 4)):
-      byte 0 : temperature integer part  (°C)
-      byte 1 : temperature fractional    (tenths)
-      byte 2 : relative humidity integer (%)
-      byte 3 : checksum = byte0 ^ byte1 ^ byte2
+  Master writes to this node (2 bytes):
+    byte 0 : freeCount  number of free rooms in the currently displayed slot (0-8)
+    byte 1 : slotIdx    reserved
 
-  Wiring:
-    D2   DHT11 data line (10 kΩ pull-up to 5 V)
+  Master reads from this node (4 bytes via Wire.requestFrom):
+    byte 0 : temperature integer part  (e.g., 22 for 22.5 C)
+    byte 1 : temperature fractional tenths  (e.g., 5 for 22.5 C)
+    byte 2 : relative humidity integer percent  (e.g., 65)
+    byte 3 : checksum = byte0 ^ byte1 ^ byte2
+
+  Pin assignments:
+    D2   DHT11 data line (10 kOhm pull-up resistor to 5V required)
+    D3   7-segment pin a (top segment)
+    D4   7-segment pin b (top-right)
+    D5   7-segment pin c (bottom-right)
+    D6   7-segment pin d (bottom)
+    D7   7-segment pin e (bottom-left)
+    D8   7-segment pin f (top-left)
+    D9   7-segment pin g (middle)
     A4   I2C SDA
     A5   I2C SCL
 
-  5161AS (common cathode) direct wiring – each segment via 220Ω:
-    Arduino D3  → 220Ω → pin7  (segment a – top)
-    Arduino D4  → 220Ω → pin6  (segment b – top-right)
-    Arduino D5  → 220Ω → pin4  (segment c – bottom-right)
-    Arduino D6  → 220Ω → pin2  (segment d – bottom)
-    Arduino D7  → 220Ω → pin1  (segment e – bottom-left)
-    Arduino D8  → 220Ω → pin9  (segment f – top-left)
-    Arduino D9  → 220Ω → pin10 (segment g – middle)
-    5161AS COM  pin3 & pin8 → GND  (common cathode)
+  5161AS (common cathode) wiring - each segment through a 220 ohm resistor:
+    Arduino D3  → 220 ohm → pin 7  (segment a - top)
+    Arduino D4  → 220 ohm → pin 6  (segment b - top-right)
+    Arduino D5  → 220 ohm → pin 4  (segment c - bottom-right)
+    Arduino D6  → 220 ohm → pin 2  (segment d - bottom)
+    Arduino D7  → 220 ohm → pin 1  (segment e - bottom-left)
+    Arduino D8  → 220 ohm → pin 9  (segment f - top-left)
+    Arduino D9  → 220 ohm → pin 10 (segment g - middle)
+    5161AS COM  pins 3 and 8 → GND  (common cathode ground)
 
-  5161AS pin layout (facing front, decimal point bottom-right):
-    Bottom L→R : 1(e)  2(d)  3(COM)  4(c)  5(dp)
-    Top    R→L : 6(b)  7(a)  8(COM)  9(f) 10(g)
+  5161AS pin layout (facing front, decimal point at bottom-right):
+    Bottom left to right : 1(e)  2(d)  3(COM)  4(c)  5(dp)
+    Top right to left    : 6(b)  7(a)  8(COM)  9(f) 10(g)
 
   Libraries required:
     DHT sensor library by Adafruit
-  ================================================================
 */
 
 #include <Wire.h>
 #include <DHT.h>
 
-// ── Pin assignments ───────────────────────────────────────────────────────────
+// Pin assignments
 #define SLAVE_ADDR    0x08
 #define DHT_PIN       2
 
@@ -58,19 +70,19 @@ const int SEG_PINS[7] = { 3, 4, 5, 6, 7, 8, 9 };
 
 DHT dht(DHT_PIN, DHT_TYPE);
 
-// ── DHT11 readings ────────────────────────────────────────────────────────────
+// DHT11 sensor readings (updated every READ_INTERVAL, read by master via I2C)
 volatile uint8_t tInt  = 0;
 volatile uint8_t tFrac = 0;
 volatile uint8_t hInt  = 0;
 
-// ── Display state ─────────────────────────────────────────────────────────────
+// 7-segment display state (updated when master sends a new free count)
 volatile uint8_t dispFreeCount  = 0;
 volatile bool    newDisplayData = false;
 
 unsigned long lastRead = 0;
 
-// ── 5161AS common-cathode segment patterns [digit][a,b,c,d,e,f,g] ────────────
-// true = segment ON (Arduino outputs HIGH for common cathode)
+// 5161AS common-cathode segment patterns indexed as [digit][a,b,c,d,e,f,g].
+// true = segment ON; Arduino outputs HIGH to illuminate a segment on common-cathode type.
 const bool SEG7[10][7] = {
   {1,1,1,1,1,1,0},  // 0
   {0,1,1,0,0,0,0},  // 1
@@ -84,7 +96,7 @@ const bool SEG7[10][7] = {
   {1,1,1,1,0,1,1},  // 9
 };
 
-// ── 7-segment display helpers ─────────────────────────────────────────────────
+// 7-segment display helper functions
 
 void showDigit(uint8_t n) {
   if (n > 9) n = 9;
@@ -98,7 +110,7 @@ void showDash() {
   digitalWrite(SEG_PINS[6], HIGH);  // g = on
 }
 
-// ── I2C handlers ──────────────────────────────────────────────────────────────
+// I2C event handlers
 
 void requestEvent() {
   uint8_t chk = tInt ^ tFrac ^ hInt;
@@ -120,7 +132,7 @@ void receiveEvent(int numBytes) {
   }
 }
 
-// ── Setup & Loop ──────────────────────────────────────────────────────────────
+// Setup and main loop
 
 void setup() {
   Serial.begin(9600);

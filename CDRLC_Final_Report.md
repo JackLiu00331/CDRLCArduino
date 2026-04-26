@@ -7,10 +7,10 @@
 
 | Name | NetID | Email |
 |------|-------|-------|
-| *(Your Name Here)* | *(NetID)* | *(email@illinois.edu)* |
-| *(Team Member 2)* | *(NetID)* | *(email@illinois.edu)* |
-| *(Team Member 3)* | *(NetID)* | *(email@illinois.edu)* |
-| *(Team Member 4)* | *(NetID)* | *(email@illinois.edu)* |
+| Delon Bui | dbui9 | dbui9@uic.edu |
+| Sean Kim | skim6497 | skim6497@uic.edu |
+| Chao Liu | cliu1051 | cliu1051@uic.edu |
+| Andrew Mikielski | amiki | amiki@uic.edu |
 
 **Project Name:** CDRLC Study Room Availability Monitor
 
@@ -32,7 +32,7 @@ The system fetches availability data from Google Calendar's public scheduling AP
 
 In addition to the main screen, eight bi-color (red/green) LED panels mounted on two separate "wing" boards provide a hardware-level at-a-glance view visible from further away. The system also features ambient light sensing (auto-brightness), proximity-based power saving (LEDs dim when no one is nearby), live temperature and humidity readings, and a buzzer alert that chimes when a previously booked room becomes available.
 
-The system is designed with extensibility in mind: the NAS-hosted Python server exposes a clean HTTP API that can be consumed by any future client, and a mobile fallback page (`/b/<CODE>`) lets users see the current booking status from any phone without the kiosk.
+The system is designed with extensibility in mind: the NAS-hosted Python server exposes a clean HTTP API that can be consumed by any future client (endpoints: `/dates`, `/slot`, `/allslots`, `/status`, `/refresh`).
 
 ---
 
@@ -41,16 +41,16 @@ The system is designed with extensibility in mind: the NAS-hosted Python server 
 The project is built around four Arduino microcontroller boards, each assigned a distinct role. This multi-board architecture was required by the project specification and also reflects a natural separation of concerns: different hardware peripherals have conflicting pin or timing demands that make a single-board design impractical.
 
 **Arduino 1 — Master Node (Arduino R4 WiFi)**
-This is the system brain. The R4 WiFi was chosen because it is the only board in the Arduino ecosystem with built-in 2.4 GHz WiFi (via the u-blox S110 module) and enough memory (256 KB flash, 32 KB SRAM) to run the TFT rendering, QR code generation, HTTP client, and I2C master logic simultaneously. It hosts the 4" TFT touch screen on its SPI bus, manages button inputs, drives the buzzer, queries the NAS server over HTTPS, and acts as I2C master to coordinate all other boards.
+This is the system brain. The R4 WiFi was chosen because it is the only board in the Arduino ecosystem with built-in 2.4 GHz WiFi (via the u-blox S110 module) and enough memory (256 KB flash, 32 KB SRAM) to run the TFT rendering, QR code generation, HTTP client, and I2C master logic simultaneously. It hosts the 4" TFT touch screen on its SPI bus, manages button inputs, drives the buzzer, queries the NAS server over HTTPS, and acts as I2C master to coordinate all other boards. It also hosts the LDR photoresistor (on analog pin A2) for ambient light sensing and the HC-SR04 ultrasonic sensor (Trig: D2, Echo: D7) for proximity detection. These two sensors together drive the TFT backlight auto-dim system and control LED brightness uniformly across both wing boards.
 
-**Arduino 2 — Environment Sensor Node (Arduino UNO R3)**
-This board's sole job is to read the DHT11 temperature and humidity sensor and serve that data over I2C on demand. The DHT11 requires precise microsecond-level timing to read, and isolating it on a dedicated board prevents the timing-sensitive sensor reading from interfering with the Master's SPI, WiFi, or display tasks. It acts as an I2C slave at address `0x08` and responds to a `requestFrom` call with a 4-byte packet (temperature integer, temperature fractional tenths, humidity integer, XOR checksum).
+**Arduino 2 — Environment and Display Node (Arduino UNO R3)**
+This board reads the DHT11 temperature and humidity sensor and serves that data over I2C on demand. The DHT11 requires precise microsecond-level timing to read, and isolating it on a dedicated board prevents timing conflicts with the Master's SPI, WiFi, and display tasks. It also drives a 5161AS single-digit 7-segment display (common cathode, directly wired to D3–D9) that shows the number of currently free rooms, updated by the Master each time room data changes. It acts as an I2C slave at address `0x08`, responding to `requestFrom` calls with a 4-byte temperature/humidity packet and accepting 2-byte writes from the Master carrying the free room count.
 
 **Arduino 3 — Wing A LED Node (Arduino UNO R3)**
-Controls five bi-color LED indicators for rooms 2432, 2434, 2436, 2438, and 2440. It listens on I2C address `0x09` for a 3-byte packet from the Master and updates LED colors accordingly. A photoresistor (LDR) on analog pin A0 allows this board to automatically adjust LED brightness based on ambient room lighting, keeping the display readable day and night.
+Controls five bi-color LED indicators for rooms 2432, 2434, 2436, 2438, and 2440. It listens on I2C address `0x09` for a 4-byte packet from the Master and updates LED colors and brightness accordingly. The packet includes an ambient brightness value computed by the Master's LDR, ensuring all eight LEDs across both wing boards maintain consistent brightness relative to the surrounding light level. When the TFT screen enters sleep mode, the Master sends brightness = 0, which extinguishes all LEDs — including red booked-room indicators — until the next wake event.
 
 **Arduino 4 — Wing B LED Node (Arduino UNO R3)**
-Controls three bi-color LED indicators for rooms 2426, 2428, and 2430, and uses an HC-SR04 ultrasonic distance sensor to detect whether a person is standing nearby. When no one is within 150 cm, the LEDs dim to approximately 10% brightness to reduce power consumption and light pollution; they snap to full brightness the moment someone approaches.
+Controls three bi-color LED indicators for rooms 2426, 2428, and 2430. It listens on I2C address `0x0A` and uses the same 4-byte protocol as Wing A. Brightness control and proximity-based sleep behavior are handled centrally by the Master: when no one is detected within 100 cm by the HC-SR04, the Master fades the TFT backlight and eventually sends brightness = 0 to both wing boards, putting all LEDs to sleep. Any approach, button press, or touch immediately wakes both the screen and all LEDs together.
 
 All four boards share a single I2C bus (SDA on A4, SCL on A5), allowing the Master to address each slave independently. The Master is the only board with WiFi access; the slave boards have no network knowledge and only respond to I2C commands.
 
@@ -69,17 +69,18 @@ All four boards communicate over a shared two-wire I2C bus. The Arduino R4 WiFi 
 | `0x09`  | Arduino 3 (Wing A) | LED controller — receives status byte from Master |
 | `0x0A`  | Arduino 4 (Wing B) | LED controller — receives status byte from Master |
 
-### Master → Wing A / Wing B (Write — 3 bytes)
+### Master → Wing A / Wing B (Write — 4 bytes)
 
-Each time the Master receives new availability data from the server, it packs the status of each room into a single byte and transmits it to each Wing board using a 3-byte I2C write:
+Each time the Master receives new availability data from the server, or every second as part of brightness synchronization, it packs room status and LED brightness into a 4-byte I2C write sent to each Wing board:
 
 ```
-Byte 0: control byte = 0x01 (identifies this as a status update packet)
-Byte 1: status byte  = bitmask of booked rooms (bit N = 1 means room N is booked)
-Byte 2: checksum     = Byte 0 XOR Byte 1
+Byte 0: ctrl       = 0x01 (packet type identifier)
+Byte 1: status     = bitmask of booked rooms (bit N = 1 means room N is booked)
+Byte 2: brightness = LED brightness value (0 = screen off/LEDs sleep, 40–255 = active)
+Byte 3: checksum   = Byte 0 XOR Byte 1 XOR Byte 2
 ```
 
-Wing A uses bits 0–4 for rooms 2432–2440; Wing B uses bits 0–2 for rooms 2426–2430. The Wing boards verify the checksum before updating their LEDs to prevent corrupt packets from causing incorrect displays.
+Wing A uses bits 0–4 of the status byte for rooms 2432–2440; Wing B uses bits 0–2 for rooms 2426–2430. The brightness value is derived from the Master's LDR reading (calibrated range: 102 = fully covered → brightness 40; 850 = direct light → brightness 255) and is broadcast to both wings every second so LED brightness tracks ambient light in real time. When brightness = 0 (TFT screen in sleep mode), Wing boards extinguish all LEDs — including red booked-room indicators — until the Master sends a non-zero brightness on the next wake event. The Wing boards verify the XOR checksum before applying any update.
 
 ### Master → Arduino 2 (Read — 4 bytes via `requestFrom`)
 
@@ -100,8 +101,8 @@ The Master is the only board with network access. It uses `WiFiSSLClient` and `A
 
 - `/dates` — fetches a comma-separated list of upcoming bookable weekdays
 - `/slot?date=YYYYMMDD&time=HHMM` — fetches an 8-character availability string (`0`=free, `1`=booked)
+- `/allslots?date=YYYYMMDD` — fetches all 8 time slots for a date in one request (used during prefetch)
 - `/refresh` — triggers an immediate re-poll of Google Calendar on the server
-- `/newbook?date=YYYYMMDD&time=HHMM` — creates a booking session and returns a 6-character code for the mobile fallback page
 
 All data flow is strictly one-directional for the slave boards: they receive from the Master and never initiate communication.
 
@@ -113,24 +114,25 @@ All data flow is strictly one-directional for the slave boards: they receive fro
 
 | Input Device | Board | Description |
 |---|---|---|
-| TFT Touchscreen (XPT2046) | Arduino 1 | User taps room rows to trigger QR display; taps QR screen to return |
-| Push Button 1 (D4) | Arduino 1 | Cycles to the next available time slot (09:30 → 10:30 → … → 16:30 → wrap) |
-| Push Button 2 (D5) | Arduino 1 | Forces an immediate re-fetch from the server |
-| Push Button 3 (D6) | Arduino 1 | Cycles to the next available bookable date |
-| DHT11 Sensor (D2) | Arduino 2 | Reads ambient temperature (°C) and relative humidity (%) |
-| LDR Photoresistor (A0) | Arduino 3 | Reads ambient light level to adjust Wing A LED brightness |
-| HC-SR04 Ultrasonic (D9/D10) | Arduino 4 | Detects proximity (≤150 cm = someone nearby) to adjust Wing B brightness |
-| Google Calendar API | NAS Server | Provides real-time room booking availability data (polled every 5 minutes) |
+| TFT Touchscreen (XPT2046) | Arduino 1 | User taps room rows to trigger QR display; taps QR screen to return; any touch resets the idle/sleep timer |
+| Push Button 1 (D4) | Arduino 1 | Cycles to the next available time slot (09:30 → 10:30 → … → 16:30 → wrap); resets idle timer |
+| Push Button 2 (D5) | Arduino 1 | Forces an immediate re-fetch from the server; resets idle timer |
+| Push Button 3 (D6) | Arduino 1 | Cycles to the next available bookable date; resets idle timer |
+| HC-SR04 Ultrasonic (D2/D7) | Arduino 1 | Detects proximity ≤ 100 cm = someone present; wakes screen and LEDs; polled every 200 ms |
+| LDR Photoresistor (A2) | Arduino 1 | Reads ambient light level; sets LED brightness (40–255) broadcast to both wing boards every second |
+| DHT11 Sensor (D2) | Arduino 2 | Reads ambient temperature (°C) and relative humidity (%); sent to master over I2C every 30 seconds |
+| Google Calendar API | NAS Server | Provides real-time room booking availability data (polled every 5 minutes; prefetched for all dates on startup) |
 
 ### Outputs
 
 | Output Device | Board | Description |
 |---|---|---|
-| 4" TFT LCD (480×320) | Arduino 1 | Normal view: 8 color-coded room rows with date/time/temperature header; QR view: full-screen scannable QR code |
+| 4" TFT LCD (480×320) | Arduino 1 | Normal view: 8 color-coded room rows with date/time/temperature header; QR view: full-screen scannable QR code; fades and sleeps after 30 seconds of inactivity |
 | Passive Buzzer (D8) | Arduino 1 | Two-tone chime (880 Hz + 1047 Hz) when a booked room transitions to free |
-| 5× Bi-color LEDs | Arduino 3 | Green = room free, Red = room booked; brightness auto-adjusted by LDR |
-| 3× Bi-color LEDs | Arduino 4 | Same green/red logic; proximity-dimmed to 10% when no one is nearby |
-| Mobile Web Page (`/b/<CODE>`) | NAS Server | Phone-accessible fallback page listing all rooms with direct Google Calendar booking links |
+| TFT Backlight (D3 PWM) | Arduino 1 | Full brightness when active; smooth 3-second fade from 10–13 s idle; dim at 13–30 s; off at 30 s+ |
+| 5× Bi-color LEDs | Arduino 3 | Green = room free, Red = room booked; brightness set by master LDR; all off when master screen sleeps |
+| 1-digit 7-segment display | Arduino 2 | Displays count of currently free rooms (0–8); updated each time master sends new slot data |
+| 3× Bi-color LEDs | Arduino 4 | Same green/red logic as Wing A; shares centralized brightness and sleep behavior via I2C |
 | Serial Monitor (debug) | All boards | Diagnostic output for development and troubleshooting |
 
 ### TFT Normal Screen Layout
@@ -180,7 +182,7 @@ Several aspects of the implementation required novel problem-solving that goes b
 
 **Secure public HTTPS access without a static IP or port forwarding.** The server is exposed via Tailscale Funnel, which provides TLS termination and a stable public HTTPS endpoint even behind NAT, carrier-grade NAT, or dynamic IP. The Arduino connects using `WiFiSSLClient` with no certificate pinning required (Tailscale's certificate is signed by a public CA). This is a practical and replicable pattern for any Arduino IoT project that needs cloud connectivity.
 
-**Proximity-aware LED power management.** Wing B's HC-SR04 integration was designed to reduce power consumption and avoid light pollution when no one is near the display. The threshold (150 cm) and dim level (10%, or `analogWrite` value 25) were chosen empirically so the LEDs remain readable as status indicators while being unobtrusive during off-hours.
+**Unified proximity-aware backlight and LED power management.** The HC-SR04 ultrasonic sensor on the Master board provides centralized proximity detection. When no one is within 100 cm for more than 10 seconds, the TFT backlight begins a 3-second smooth fade from full brightness (255) to a dim level (40). After 30 seconds of inactivity, the screen turns completely off. Any approach, touch, or button press immediately restores full brightness. Critically, the brightness byte in the I2C packet sent to both wing boards is set to 0 when the screen is off, causing all 8 LEDs — including red booked-room indicators — to go dark simultaneously. This keeps the physical LED panels in sync with the screen's power state, reducing light pollution during off-hours without requiring independent sensing hardware on each wing board.
 
 **Non-blocking concurrency on a single-threaded microcontroller.** The Master's `loop()` function handles button debouncing, touch polling, buzzer sequencing, periodic server fetching, and DHT11 requests concurrently using a state-machine and `millis()`-based timers, avoiding any `delay()` calls that would freeze the display or miss inputs.
 
@@ -206,7 +208,7 @@ Connect the 4" TFT screen and touch controller to the R4 WiFi's SPI bus:
 | TFT | CS | D10 |
 | TFT | DC / RS | A0 (= digital pin 14) |
 | TFT | RST | D9 |
-| TFT | LED (backlight) | 3.3V |
+| TFT | LED (backlight) | D3 (PWM — do NOT connect to 3.3V or 5V directly) |
 | Touch (XPT2046) | T_CS | A1 (= digital pin 15) |
 | Passive buzzer | + (signal) | D8 |
 | Passive buzzer | − | GND |
@@ -216,12 +218,18 @@ Connect the 4" TFT screen and touch controller to the R4 WiFi's SPI bus:
 | Button 2 | other leg | GND |
 | Button 3 | one leg | D6 |
 | Button 3 | other leg | GND |
+| HC-SR04 | VCC | 5V |
+| HC-SR04 | GND | GND |
+| HC-SR04 | Trig | D2 |
+| HC-SR04 | Echo | D7 |
+| LDR | one end | 5V |
+| LDR | other end | A2 AND → 10 kΩ → GND |
 | I2C SDA | — | A4 |
 | I2C SCL | — | A5 |
 
-> **Note:** The R4 WiFi uses internal pull-up resistors for the buttons (`INPUT_PULLUP`), so no external resistors are needed on the button lines. The TFT backlight LED can also be connected to a PWM pin if adjustable brightness is desired.
+> **Note:** The R4 WiFi uses internal pull-up resistors for the buttons (`INPUT_PULLUP`), so no external resistors are needed on button lines. The TFT backlight is connected to D3 (PWM) to allow brightness control via `analogWrite`. Do not connect the TFT BL pin directly to 3.3V or 5V.
 
-#### 6.3 Wire Arduino 2 (Environment Node — UNO R3)
+#### 6.3 Wire Arduino 2 (Environment and Display Node — UNO R3)
 
 | Component | Pin | Arduino UNO Pin |
 |-----------|-----|-----------------|
@@ -229,6 +237,14 @@ Connect the 4" TFT screen and touch controller to the R4 WiFi's SPI bus:
 | DHT11 | GND | GND |
 | DHT11 | DATA | D2 |
 | Pull-up resistor | 10 kΩ between DATA and 5V | — |
+| 5161AS pin 7 (seg a) | via 220 Ω | D3 |
+| 5161AS pin 6 (seg b) | via 220 Ω | D4 |
+| 5161AS pin 4 (seg c) | via 220 Ω | D5 |
+| 5161AS pin 2 (seg d) | via 220 Ω | D6 |
+| 5161AS pin 1 (seg e) | via 220 Ω | D7 |
+| 5161AS pin 9 (seg f) | via 220 Ω | D8 |
+| 5161AS pin 10 (seg g) | via 220 Ω | D9 |
+| 5161AS COM (pins 3, 8) | — | GND |
 | I2C SDA | — | A4 |
 | I2C SCL | — | A5 |
 
@@ -244,9 +260,7 @@ Each bi-color LED is a common-cathode type. Connect the common pin through a 220
 | 2438 | D9 (PWM) | D8 |
 | 2440 | D10 (PWM) | D11 |
 
-LDR circuit: one leg → 5V; other leg → A0 AND through 10 kΩ → GND.
-
-I2C: A4 = SDA, A5 = SCL.
+I2C: A4 = SDA, A5 = SCL. No LDR on this board — ambient brightness is read by the Master (A2).
 
 #### 6.5 Wire Arduino 4 (Wing B — UNO R3)
 
@@ -256,9 +270,7 @@ I2C: A4 = SDA, A5 = SCL.
 | 2428 | D5 (PWM) | D4 |
 | 2430 | D6 (PWM) | D7 |
 
-HC-SR04: VCC → 5V, GND → GND, Trig → D9, Echo → D10.
-
-I2C: A4 = SDA, A5 = SCL.
+I2C: A4 = SDA, A5 = SCL. No HC-SR04 on this board — proximity detection is on the Master (D2/D7).
 
 #### 6.6 Connect the I2C Bus
 
@@ -408,14 +420,17 @@ With all four boards powered and the I2C bus connected:
 
 1. Verify the TFT shows the CDRLC splash screen on power-up
 2. Verify WiFi connection and the room availability list appears
-3. Verify temperature/humidity appears in the header
-4. Verify LEDs on Wing A and Wing B reflect the correct green/red status
-5. Cover the LDR on Wing A — verify brightness changes
-6. Move toward Wing B within 150 cm — verify LEDs brighten
-7. Tap a green room row on the TFT — verify QR code appears
-8. Scan the QR with a phone — verify the Google Calendar booking page opens
-9. Tap anywhere on the QR screen — verify the room list returns
-10. Press BTN1 (slot cycle), BTN3 (date cycle), BTN2 (manual refresh) — verify each works
+3. Verify temperature/humidity appears in the TFT header
+4. Verify the 7-segment display on Arduino 2 shows the correct free room count
+5. Verify LEDs on Wing A and Wing B reflect the correct green/red status
+6. Cover the LDR on the Master (A2) — verify all 8 LEDs dim together
+7. Wait 10 seconds without any activity — verify TFT backlight begins to fade
+8. Wait 30 seconds — verify TFT screen turns off and all LEDs go dark
+9. Walk within 100 cm of the HC-SR04 — verify screen and LEDs wake immediately
+10. Tap a green room row on the TFT — verify QR code appears
+11. Scan the QR with a phone — verify the Google Calendar booking page opens
+12. Tap anywhere on the QR screen — verify the room list returns
+13. Press BTN1 (slot cycle), BTN3 (date cycle), BTN2 (manual refresh) — verify each works and wakes the screen if asleep
 
 ---
 
@@ -437,7 +452,12 @@ The TFT display is divided into a header bar and eight room rows:
 
 - **Green LED lit:** The room is available for the currently displayed time slot.
 - **Red LED lit:** The room is booked.
-- **Dim LEDs (Wing B):** No one has been detected nearby in the past 300 ms. LEDs automatically brighten when someone approaches within 150 cm.
+- **All LEDs off:** The kiosk screen has entered sleep mode (30+ seconds of no activity and no one within 100 cm). All LEDs, including red indicators, turn off together with the screen. Walk up to the kiosk or press any button to wake everything simultaneously.
+- **LED brightness:** All 8 LEDs (Wing A and Wing B) share a single brightness level driven by the photoresistor on the Master board. They automatically dim in low-light conditions and brighten under strong ambient light, keeping the display readable at all times.
+
+#### What the 7-Segment Display Shows
+
+A single-digit 7-segment display on the environment board shows the total count of currently free rooms (0–8) for the selected time slot. It updates automatically whenever the Master receives new data or the user changes the date or slot.
 
 #### What the Buzzer Does
 
@@ -469,15 +489,15 @@ A two-tone chime (ascending: 880 Hz then 1047 Hz) sounds whenever the system det
 
 ---
 
-### 7.4 Mobile Fallback Page
+### 7.4 Server Status Page (Debug)
 
-If the TFT kiosk is unavailable, the system provides a mobile web page accessible from any phone on any network. Navigate to:
+The server exposes a human-readable status page at `/status` for debugging. From any browser on the same network as the NAS, navigate to:
 
 ```
-https://your-nas.tail1234ab.ts.net/b/<CODE>
+http://localhost:8080/status
 ```
 
-Where `<CODE>` is a 6-character session code generated by the server. This page lists all 8 rooms with their current booking status and direct links to each room's Google Calendar scheduling page.
+This page shows the current cached availability for all rooms and all time slots, useful for verifying the server is polling Google Calendar correctly.
 
 ---
 
@@ -485,16 +505,17 @@ Where `<CODE>` is a 6-character session code generated by the server. This page 
 
 | Device | Type | Location | User Action / Information Provided |
 |--------|------|----------|-------------------------------------|
-| TFT Touch Screen (480×320) | Input + Output | Arduino 1 | Tap rows to view QR; displays room list, QR codes, date/time, temperature |
-| Button 1 | Input | Arduino 1 (D4) | Press to cycle to next time slot |
-| Button 2 | Input | Arduino 1 (D5) | Press to force a data refresh from server |
-| Button 3 | Input | Arduino 1 (D6) | Press to cycle to next date |
+| TFT Touch Screen (480×320) | Input + Output | Arduino 1 | Tap free rows to open QR; tap QR to return; any touch wakes screen; displays room list, QR codes, date/time, temperature |
+| Button 1 | Input | Arduino 1 (D4) | Press to cycle to next time slot; wakes screen if asleep |
+| Button 2 | Input | Arduino 1 (D5) | Press to force a data refresh from server; wakes screen if asleep |
+| Button 3 | Input | Arduino 1 (D6) | Press to cycle to next date; wakes screen if asleep |
 | Passive Buzzer | Output | Arduino 1 (D8) | Chimes when a room becomes available |
+| HC-SR04 Ultrasonic | Input (proximity) | Arduino 1 (D2/D7) | Detects person within 100 cm; wakes screen and LEDs; triggers fade/sleep timer when area is empty |
+| LDR Photoresistor | Input (ambient) | Arduino 1 (A2) | Senses ambient light; sets LED brightness for all 8 wing LEDs; brighter room = brighter LEDs |
 | DHT11 Sensor | Input (ambient) | Arduino 2 (D2) | Measures room temperature and humidity (shown on TFT header) |
-| 5× Bi-color LEDs | Output | Arduino 3 | Green = free, Red = booked; auto-brightness via LDR |
-| LDR | Input (ambient) | Arduino 3 (A0) | Senses ambient light; adjusts Wing A LED brightness automatically |
-| 3× Bi-color LEDs | Output | Arduino 4 | Green = free, Red = booked; dims when no one nearby |
-| HC-SR04 | Input (proximity) | Arduino 4 (D9/D10) | Detects person within 150 cm; dims Wing B LEDs when unoccupied |
+| 1-digit 7-segment | Output | Arduino 2 (D3–D9) | Displays free room count (0–8) for the currently selected time slot |
+| 5× Bi-color LEDs | Output | Arduino 3 | Green = free, Red = booked; all off when screen sleeps |
+| 3× Bi-color LEDs | Output | Arduino 4 | Green = free, Red = booked; all off when screen sleeps |
 
 ---
 
@@ -550,7 +571,7 @@ This section documents the significant design ideas explored during development,
 
 **Why it was rejected:** The project specification requires exactly four Arduino boards. Beyond the formal requirement, the LED wings serve a genuinely different UX purpose: they are visible from a distance, in low-light conditions, and peripherally (without looking directly at the screen). A student walking down the hallway can glance at the LED panel and instantly know whether any room is free without approaching the kiosk. The TFT requires being within ~1 meter and oriented correctly. The two output modalities (TFT for detailed booking, LEDs for at-a-glance status) complement each other rather than duplicate.
 
-**What we did instead:** We kept all four boards and retained the LED wings. We added value to the wings by implementing LDR-based auto-brightness (Wing A) and proximity-based power saving via HC-SR04 (Wing B), turning them from simple LED panels into adaptive, context-aware output devices.
+**What we did instead:** We kept all four boards and retained the LED wings. We added value to the system by centralizing ambient brightness control: a single LDR on the Master (A2) reads the room light level and broadcasts the result to both wings in every I2C packet, ensuring all 8 LEDs share identical brightness. Proximity-based sleep (HC-SR04 on the Master) puts both the TFT screen and all wing LEDs to sleep together, keeping the physical display panels in sync with the screen's power state.
 
 ---
 
@@ -578,9 +599,9 @@ This section documents the significant design ideas explored during development,
 | Week 6 | TFT touch screen design adopted; `User_Setup.h` configured for ST7796S; TFT rendering of room list working; touch input mapped to rows |
 | Week 7 | On-device QR code generation via `qrcode` library; version 9 ECC_LOW selected; GCAL_URLS array moved to flash; QR scan tested on phone |
 | Week 8 | DHT11 moved from Master to Arduino 2 (I2C slave protocol); 4-byte packet with XOR checksum; temperature/humidity shown in TFT header |
-| Week 9 | Wing A LDR auto-brightness; Wing B HC-SR04 proximity dimming; non-blocking buzzer state machine; all three buttons debounced |
+| Week 9 | Centralized LDR (Master A2) and HC-SR04 (Master D2/D7) for unified LED brightness and proximity-based screen/LED sleep; non-blocking buzzer state machine; all three buttons debounced |
 | Week 10 | Server deployed on NAS via Docker Compose; Tailscale Funnel configured; nginx rate limiting and route whitelist; public HTTPS URL tested from Arduino |
-| Week 11 | Final integration test; touch calibration; end-to-end booking flow verified; mobile fallback `/b/<CODE>` page tested; README and final documentation |
+| Week 11 | Final integration test; touch calibration; end-to-end booking flow verified; LED sleep/wake with screen confirmed; README and final documentation |
 
 ---
 
@@ -589,16 +610,17 @@ This section documents the significant design ideas explored during development,
 | Component | Quantity | Notes |
 |-----------|----------|-------|
 | Arduino R4 WiFi | 1 | Master Node; built-in 2.4 GHz WiFi |
-| Arduino UNO R3 | 3 | Env Node, Wing A, Wing B |
+| Arduino UNO R3 | 3 | Env/Display Node, Wing A, Wing B |
 | Hosyond 4.0" 480×320 TFT LCD | 1 | ST7796S driver + XPT2046 touch, SPI interface |
-| DHT11 temperature & humidity sensor | 1 | Env Node (Arduino 2) |
+| DHT11 temperature & humidity sensor | 1 | Arduino 2 (D2) |
+| 5161AS 1-digit 7-segment display | 1 | Arduino 2 (D3–D9), common cathode |
 | Bi-color LED (red/green, common cathode) | 8 | 5 for Wing A, 3 for Wing B |
-| 220 Ω resistor | 8 | LED current limiting (one per LED) |
-| 10 kΩ resistor | 3 | 1× DHT11 pull-up, 1× LDR voltage divider, 1× spare |
+| 220 Ω resistor | 15 | 8× LED current limiting, 7× 7-segment segment limiting |
+| 10 kΩ resistor | 3 | 1× DHT11 data pull-up, 1× LDR voltage divider, 1× spare |
 | Passive buzzer | 1 | Master Node (D8) |
 | Momentary push button | 3 | Master Node (D4, D5, D6) |
-| LDR (photoresistor) | 1 | Wing A (A0) |
-| HC-SR04 ultrasonic sensor | 1 | Wing B (D9, D10) |
+| LDR (photoresistor) | 1 | Master Node (A2); centralized ambient brightness for all LEDs |
+| HC-SR04 ultrasonic sensor | 1 | Master Node (Trig: D2, Echo: D7); proximity-based screen and LED sleep |
 | Breadboard(s) | 4 | One per Arduino (or perfboard for final build) |
 | Jumper wires (M-M, M-F) | ~60 | For I2C bus, LED wiring, sensors |
 | USB-A to USB-B cable | 3 | For UNO R3 power + programming |

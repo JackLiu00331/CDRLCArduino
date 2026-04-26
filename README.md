@@ -12,14 +12,14 @@ A real-time study room availability system for a university library (CDRLC). Fou
 | **TFT touch display** | 480×320 colour screen: green rows = free, grey = booked |
 | **One-tap QR booking** | Tap a free room → QR code appears on-screen → scan with phone → Google Calendar booking page |
 | **Bi-color LED panels** | Hardware green/red LEDs for at-a-glance status from a distance |
-| **Proximity auto-dim** | Wing B LEDs dim to 10% when no one is nearby (HC-SR04) |
-| **Ambient auto-brightness** | Wing A LED brightness follows room light level (LDR) |
+| **Proximity auto-dim** | HC-SR04 on Master board: TFT fades after 10 s idle, off after 30 s; all LEDs sleep simultaneously |
+| **Ambient auto-brightness** | LDR on Master board: single ambient reading broadcast to all 8 LEDs every second |
 | **Buzzer alert** | Two-tone beep when a room transitions from booked → free |
 | **Temperature & humidity** | DHT11 reading shown live in the TFT header |
 | **Multi-date browsing** | Button cycles through available weekdays |
 | **Multi-slot browsing** | Button cycles through 8 one-hour slots (09:30–16:30) |
 | **Manual refresh** | Button triggers an immediate server re-fetch |
-| **Emergency mobile page** | `/b/<CODE>` URL shows all rooms with booking links on any phone |
+| **Free room count display** | 1-digit 7-segment display on Env Node shows live free room count (0–8) |
 | **Rate-limited HTTPS** | nginx caps requests at 60/min per IP; Tailscale Funnel provides TLS |
 
 ---
@@ -30,25 +30,25 @@ A real-time study room availability system for a university library (CDRLC). Fou
 
 | Board | Model | Key hardware |
 |-------|-------|-------------|
-| Arduino 1 – Master | Arduino R4 WiFi | 4" TFT (ST7796S), XPT2046 touch, passive buzzer, 3× push buttons |
-| Arduino 2 – Env Node | Arduino UNO R3 | DHT11 temperature & humidity sensor |
-| Arduino 3 – Wing A | Arduino UNO R3 | 5× bi-color LEDs (rooms 2432–2440), LDR |
-| Arduino 4 – Wing B | Arduino UNO R3 | 3× bi-color LEDs (rooms 2426–2430), HC-SR04 ultrasonic |
+| Arduino 1 – Master | Arduino R4 WiFi | 4" TFT (ST7796S), XPT2046 touch, passive buzzer, 3× push buttons, HC-SR04 ultrasonic, LDR |
+| Arduino 2 – Env/Display Node | Arduino UNO R3 | DHT11 temperature & humidity sensor, 5161AS 7-segment display (free room count) |
+| Arduino 3 – Wing A | Arduino UNO R3 | 5× bi-color LEDs (rooms 2432–2440) |
+| Arduino 4 – Wing B | Arduino UNO R3 | 3× bi-color LEDs (rooms 2426–2430) |
 
 ### Full component list
 
-- Arduino R4 WiFi × 1
-- Arduino UNO R3 × 3
+- Arduino R4 WiFi × 1 (Master Node)
+- Arduino UNO R3 × 3 (Env/Display Node, Wing A, Wing B)
 - Hosyond 4.0" 480×320 TFT LCD (ST7796S driver, SPI, includes XPT2046 touch) × 1
 - DHT11 temperature & humidity sensor × 1
+- 5161AS 1-digit 7-segment display (common cathode) × 1
 - Bi-color (red/green common-cathode) LED × 8
-- 220 Ω resistors × 8 (LED current limiting)
-- 10 kΩ resistor × 1 (DHT11 data pull-up)
+- 220 Ω resistors × 15 (8 for LEDs, 7 for 7-segment segments)
+- 10 kΩ resistor × 2 (1 for DHT11 data pull-up, 1 for LDR voltage divider)
 - Passive buzzer × 1
 - Momentary push button × 3
-- LDR (light-dependent resistor) × 1
-- 10 kΩ resistor × 1 (LDR voltage divider)
-- HC-SR04 ultrasonic distance sensor × 1
+- LDR (light-dependent resistor) × 1 (on Master, A2)
+- HC-SR04 ultrasonic distance sensor × 1 (on Master, Trig D2 / Echo D7)
 - NAS or always-on Linux machine (e.g. Ugreen DH2300)
 - I2C pull-up resistors (4.7 kΩ on SDA & SCL if bus is long)
 
@@ -100,9 +100,8 @@ A real-time study room availability system for a university library (CDRLC). Fou
          ▼                ▼              ▼
   Arduino 2          Arduino 3      Arduino 4
   DHT11 sensor       Wing A LEDs    Wing B LEDs
-  (0x08)             (0x09)         (0x0A)
-                     2432–2440      2426–2430
-                     LDR auto-dim   HC-SR04 proximity
+  7-seg display      (0x09)         (0x0A)
+  (0x08)             2432–2440      2426–2430
 ```
 
 ---
@@ -140,11 +139,11 @@ The brain of the system. Connects to the NAS server over HTTPS (via Tailscale Fu
 
 ---
 
-### Board 2 – Environment Node  (`ui_node/`)
+### Board 2 – Environment and Display Node  (`ui_node/`)
 
 **Hardware:** Arduino UNO R3
 
-Simple I2C slave. Reads the DHT11 sensor every 2 seconds and responds to Master's `requestFrom(0x08, 4)` with a 4-byte packet:
+I2C slave at address `0x08`. Reads the DHT11 sensor every 2 seconds and responds to Master's `requestFrom(0x08, 4)` with a 4-byte packet:
 
 ```
 byte 0: temperature integer   (e.g. 22 for 22.5 °C)
@@ -152,6 +151,8 @@ byte 1: temperature fractional tenths  (e.g. 5)
 byte 2: humidity integer %    (e.g. 65)
 byte 3: checksum = b0 ^ b1 ^ b2
 ```
+
+Also drives a **5161AS 1-digit 7-segment display** (common cathode, D3–D9) that shows the number of currently free rooms (0–8), updated each time the Master sends new slot data via `Wire.write`.
 
 ---
 
@@ -161,10 +162,11 @@ byte 3: checksum = b0 ^ b1 ^ b2
 
 Controls **5 bi-color LEDs** for rooms 2432, 2434, 2436, 2438, 2440.
 
-- Receives an I2C 3-byte packet `[0x01, statusByte, checksum]` from Master
+- Receives a 4-byte I2C packet `[0x01, statusByte, brightness, checksum]` from Master
 - `statusByte` bits 0–4 map to rooms 2432–2440 (1 = booked, 0 = free)
-- **Green** = available, **Red** = booked
-- Reads an LDR on A0 to auto-adjust LED brightness to ambient light level
+- **Green** = available (PWM pins D3/D5/D6/D9/D10 for dimming), **Red** = booked (digital pins)
+- `brightness` is the LDR reading from the Master (A2), 40–255; set to 0 when screen sleeps
+- When `brightness = 0`, all LEDs including red are extinguished
 
 ---
 
@@ -174,8 +176,9 @@ Controls **5 bi-color LEDs** for rooms 2432, 2434, 2436, 2438, 2440.
 
 Controls **3 bi-color LEDs** for rooms 2426, 2428, 2430.
 
-- Same I2C protocol as Wing A (bits 0–2 of statusByte)
-- HC-SR04 ultrasonic sensor on D9/D10: dims LEDs to 10% when no one is within 150 cm, full brightness when someone approaches
+- Same 4-byte I2C protocol as Wing A (bits 0–2 of statusByte)
+- Brightness and sleep/wake behavior are controlled centrally by the Master
+- No local LDR or HC-SR04; proximity sensing is on the Master board
 
 ---
 
@@ -185,11 +188,11 @@ Controls **3 bi-color LEDs** for rooms 2426, 2428, 2430.
 
 | File | Description |
 |------|-------------|
-| `master_node/master_node.ino` | Main controller: WiFi, TFT, touch, QR generation, I2C master, buttons, buzzer |
+| `master_node/master_node.ino` | Main controller: WiFi, TFT, touch, QR generation, I2C master, buttons, buzzer, HC-SR04, LDR |
 | `master_node/User_Setup.h` | TFT_eSPI pin & driver configuration for ST7796S on R4 WiFi |
-| `ui_node/ui_node.ino` | Arduino 2: DHT11 I2C slave, responds to requestFrom with 4-byte temp/humi packet |
-| `wing_a.ino` | Arduino 3: Wing A bi-color LED controller with LDR auto-brightness |
-| `wing_b.ino` | Arduino 4: Wing B bi-color LED controller with HC-SR04 proximity dimming |
+| `ui_node/ui_node.ino` | Arduino 2: DHT11 I2C slave + 5161AS 7-segment free-room-count display |
+| `wing_a/wing_a.ino` | Arduino 3: Wing A bi-color LED controller (rooms 2432–2440), 4-byte I2C protocol |
+| `wing_b/wing_b.ino` | Arduino 4: Wing B bi-color LED controller (rooms 2426–2430), 4-byte I2C protocol |
 
 ### Server
 
@@ -211,11 +214,10 @@ All endpoints are HTTPS via Tailscale Funnel. Nginx enforces a 60 req/min rate l
 |----------|---------|-------------|
 | `GET /dates` | Arduino | Comma-separated valid weekdays, e.g. `20260428,20260429` |
 | `GET /slot?date=YYYYMMDD&time=HHMM` | Arduino | 8-char status string: `0`=free, `1`=booked, e.g. `10010100` |
+| `GET /allslots?date=YYYYMMDD` | Arduino | All 8 slots for a date in one request, comma-separated |
 | `GET /hotslots?date=YYYYMMDD` | Arduino | Most-booked time label(s), e.g. `1030,1130` |
 | `GET /refresh` | Arduino (BTN2) | Triggers an immediate background re-fetch of all rooms |
 | `GET /status` | Debug | Human-readable full availability table |
-| `GET /newbook?date=YYYYMMDD&time=HHMM` | Arduino | Creates a 10-min booking session, returns 6-char code |
-| `GET /b/<CODE>` | Phone (QR sticker / fallback) | Mobile page listing all rooms with Google Calendar links |
 
 ---
 
@@ -292,7 +294,7 @@ room-server  (internal Docker bridge, port 8080)
   – Python HTTP server
   – polls Google Calendar API every 5 minutes
   – serves availability data to Arduino
-  – hosts mobile booking page /b/<CODE>
+  – serves room availability data to Arduino
 ```
 
 ### Environment variables
@@ -323,8 +325,14 @@ room-server  (internal Docker bridge, port 8080)
 | TFT | CS | D10 |
 | TFT | DC/RS | A0 |
 | TFT | RST | D9 |
-| TFT | LED | 3.3V (or PWM pin for dimming) |
+| TFT | LED (backlight) | D3 (PWM — do NOT connect to 3.3V or 5V directly) |
 | Touch | T_CS | A1 |
+| HC-SR04 | VCC | 5V |
+| HC-SR04 | GND | GND |
+| HC-SR04 | Trig | D2 |
+| HC-SR04 | Echo | D7 |
+| LDR | one end | 5V |
+| LDR | other end | A2 AND → 10 kΩ → GND |
 | Buzzer | + | D8 |
 | Button 1 | one leg | D4, other leg → GND |
 | Button 2 | one leg | D5, other leg → GND |
@@ -332,13 +340,21 @@ room-server  (internal Docker bridge, port 8080)
 | I2C SDA | — | A4 |
 | I2C SCL | — | A5 |
 
-**Arduino 2 (Env Node) wiring:**
+**Arduino 2 (Env/Display Node) wiring:**
 
 | Component | Pin | Arduino UNO Pin |
 |-----------|-----|-----------------|
 | DHT11 | VCC | 5V |
 | DHT11 | GND | GND |
 | DHT11 | DATA | D2 (+ 10 kΩ pull-up to 5V) |
+| 5161AS pin 7 (seg a) | via 220 Ω | D3 |
+| 5161AS pin 6 (seg b) | via 220 Ω | D4 |
+| 5161AS pin 4 (seg c) | via 220 Ω | D5 |
+| 5161AS pin 2 (seg d) | via 220 Ω | D6 |
+| 5161AS pin 1 (seg e) | via 220 Ω | D7 |
+| 5161AS pin 9 (seg f) | via 220 Ω | D8 |
+| 5161AS pin 10 (seg g) | via 220 Ω | D9 |
+| 5161AS COM (pins 3, 8) | — | GND |
 | I2C SDA | — | A4 |
 | I2C SCL | — | A5 |
 
@@ -354,9 +370,9 @@ Each LED: long pin (common cathode) → 220 Ω → GND
 | 2438 | D9 (PWM) | D8 |
 | 2440 | D10 (PWM)| D11 |
 
-LDR: one end → 5V, other end → A0 and → 10 kΩ → GND
+No LDR on Wing A — ambient brightness is read by the Master (A2) and sent via I2C.
 
-**Arduino 4 (Wing B) wiring – 3 bi-color LEDs + HC-SR04:**
+**Arduino 4 (Wing B) wiring – 3 bi-color LEDs:**
 
 | Room | Green pin | Red pin |
 |------|-----------|---------|
@@ -364,7 +380,7 @@ LDR: one end → 5V, other end → A0 and → 10 kΩ → GND
 | 2428 | D5 (PWM) | D4 |
 | 2430 | D6 (PWM) | D7 |
 
-HC-SR04: VCC → 5V, GND → GND, Trig → D9, Echo → D10
+No HC-SR04 on Wing B — proximity detection is on the Master (D2/D7).
 
 **I2C bus:** Connect A4+A5 of all four Arduinos together (shared bus). Add 4.7 kΩ pull-up resistors from SDA→5V and SCL→5V if your bus wires are longer than ~30 cm.
 
@@ -502,7 +518,9 @@ After first power-on, the touch coordinates may be offset. To calibrate:
 | nginx returns 404 for all requests | nginx upstream can't reach room-server | Run `docker inspect cdrlc-room-server` to get bridge IP, update `nginx.conf` upstream |
 | LEDs always green (never red) | I2C packet not arriving at Wing boards | Check wiring; verify pull-up resistors; use `i2c_ping_master.ino` to test bus |
 | DHT11 reads NaN | Bad wiring or missing pull-up | Confirm 10 kΩ pull-up on DHT11 DATA → 5V; verify D2 connection |
-| QR code doesn't scan | URL too long for QR version 9 | Check URL length; if >154 chars, the initText call returns false – Serial will show the error |
+| QR code doesn't scan | URL too long for QR version 7 | Check URL length; if >154 chars, the initText call returns size=0 — Serial will show the error |
+| LEDs stay on when screen is off | Outdated wing firmware | Re-flash wing_a and wing_b with current sketch; ensure the `if (brightness == 0)` branch is present in `updateLEDs()` |
+| All LEDs always at max brightness | I2C brightness byte not received | Check I2C wiring; verify `numBytes == 4` is matching in wing's `receiveEvent` |
 
 ---
 
@@ -522,9 +540,11 @@ Project/
 │   ├── master_node.ino     ← Arduino 1 (Master)
 │   └── User_Setup.h        ← TFT_eSPI pin config
 ├── ui_node/
-│   └── ui_node.ino         ← Arduino 2 (DHT11 sensor)
-├── wing_a.ino              ← Arduino 3 (Wing A LEDs)
-├── wing_b.ino              ← Arduino 4 (Wing B LEDs)
+│   └── ui_node.ino         ← Arduino 2 (DHT11 sensor + 7-segment display)
+├── wing_a/
+│   └── wing_a.ino          ← Arduino 3 (Wing A LEDs, rooms 2432–2440)
+├── wing_b/
+│   └── wing_b.ino          ← Arduino 4 (Wing B LEDs, rooms 2426–2430)
 ├── room_server.py          ← Python availability server
 ├── Dockerfile              ← Docker image for room-server
 ├── docker-compose.yml      ← Three-container stack

@@ -1,58 +1,64 @@
 /*
-  ================================================================
-  Arduino 3 – Wing A Display Node
   CDRLC Study Room Availability Monitor
-  ================================================================
-  负责房间：2432  2434  2436  2438  2440（共5个）
+  Arduino 3 - Wing A LED Display Node
 
-  I2C 角色：Slave，地址 0x09
-  接收 4字节数据包（master_node 发送）：
-    byte 0 : ctrl       = 0x01
-    byte 1 : status     低5位有效
-               bit 0 = 房间 2432   (0=可预约绿灯, 1=已预约红灯)
-               bit 1 = 房间 2434
-               bit 2 = 房间 2436
-               bit 3 = 房间 2438
-               bit 4 = 房间 2440
-    byte 2 : brightness  LED 亮度 (40–255)，由 master 的光敏电阻决定
+  Team Members:
+    Delon Bui        dbui9@uic.edu
+    Sean Kim         skim6497@uic.edu
+    Chao Liu         cliu1051@uic.edu
+    Andrew Mikielski amiki@uic.edu
+
+  Rooms managed: 2432, 2434, 2436, 2438, 2440 (5 rooms)
+
+  I2C role: Slave at address 0x09
+  Receives a 4-byte packet from the master node on each update:
+    byte 0 : ctrl       = 0x01 (packet type identifier)
+    byte 1 : status     bits 0-4, one per room (0 = free/green, 1 = booked/red)
+                          bit 0 = room 2432
+                          bit 1 = room 2434
+                          bit 2 = room 2436
+                          bit 3 = room 2438
+                          bit 4 = room 2440
+    byte 2 : brightness LED brightness (0 = screen off / LEDs sleep, 40-255 = active)
+                          Determined by the LDR photoresistor on the master node (A2).
     byte 3 : checksum   = byte0 ^ byte1 ^ byte2
 
-  引脚分配（每个房间1对LED）：
-    D2  房间 2432 红
-    D3  房间 2432 绿 (PWM ~3)
-    D4  房间 2434 红
-    D5  房间 2434 绿 (PWM ~5)
-    D6  房间 2436 绿 (PWM ~6)
-    D7  房间 2436 红
-    D8  房间 2438 红
-    D9  房间 2438 绿 (PWM ~9)
-    D10 房间 2440 绿 (PWM ~10)
-    D11 房间 2440 红
-    A4  I2C SDA
-    A5  I2C SCL
+  Pin assignments:
+    D2   Room 2432 red  LED (non-PWM, uses digitalWrite)
+    D3   Room 2432 green LED (PWM, uses analogWrite for dimming)
+    D4   Room 2434 red  LED (non-PWM, uses digitalWrite)
+    D5   Room 2434 green LED (PWM)
+    D6   Room 2436 green LED (PWM)
+    D7   Room 2436 red  LED (non-PWM)
+    D8   Room 2438 red  LED (non-PWM)
+    D9   Room 2438 green LED (PWM)
+    D10  Room 2440 green LED (PWM)
+    D11  Room 2440 red  LED (non-PWM)
+    A4   I2C SDA
+    A5   I2C SCL
 
-  注：光敏电阻已移至 master_node（A2），由 master 统一读取后
-      通过 I2C 亮度字节广播给所有 wing，确保8个灯亮度一致。
+  LED wiring (bi-color common-cathode):
+    Common pin (longest leg) → 220 ohm resistor → GND
+    Green pin → Arduino green pin (PWM pin, supports analogWrite for brightness)
+    Red pin   → Arduino red pin  (non-PWM pin, uses digitalWrite HIGH/LOW only)
 
-  LED 接线（双色共阴极 bi-color LED）：
-    公共脚（最长脚）→ GND（通过 220Ω 限流电阻）
-    绿色脚 → Arduino 绿色引脚
-    红色脚 → Arduino 红色引脚
+  When brightness = 0 (master screen is off / sleep mode), all LEDs are
+  extinguished, including red booked-room indicators.
 */
 
 #include <Wire.h>
 
 #define NUM_ROOMS 5
 
-// {绿色引脚, 红色引脚}，按 bit 0→4 顺序
-// UNO R3 PWM 引脚：~3 ~5 ~6 ~9 ~10 ~11
-// 绿色脚全部分配在 PWM 引脚上（空闲状态最常见，调光效果更好）
+// LED pin pairs as {green, red}, ordered by status bit 0 through 4.
+// Green pins are all PWM-capable (UNO R3: ~3 ~5 ~6 ~9 ~10) for brightness dimming.
+// Red pins are non-PWM and can only be toggled with digitalWrite.
 const int LED_PINS[NUM_ROOMS][2] = {
-  {3,  2},   // bit0 → 房间 2432  绿=D3(PWM) 红=D2
-  {5,  4},   // bit1 → 房间 2434  绿=D5(PWM) 红=D4
-  {6,  7},   // bit2 → 房间 2436  绿=D6(PWM) 红=D7
-  {9,  8},   // bit3 → 房间 2438  绿=D9(PWM) 红=D8
-  {10, 11},  // bit4 → 房间 2440  绿=D10(PWM) 红=D11(PWM)
+  {3,  2},   // bit0 → room 2432  green=D3(PWM) red=D2
+  {5,  4},   // bit1 → room 2434  green=D5(PWM) red=D4
+  {6,  7},   // bit2 → room 2436  green=D6(PWM) red=D7
+  {9,  8},   // bit3 → room 2438  green=D9(PWM) red=D8
+  {10, 11},  // bit4 → room 2440  green=D10(PWM) red=D11
 };
 
 volatile uint8_t roomStatus    = 0x00;
@@ -63,7 +69,7 @@ unsigned long lastUpdate = 0;
 const unsigned long UPDATE_INTERVAL = 200UL;
 
 
-// ── I2C 接收 ──────────────────────────────────────────────────────────────────
+// I2C receive event handler
 void receiveEvent(int numBytes) {
   if (numBytes == 4) {
     uint8_t ctrl = Wire.read();
@@ -81,7 +87,7 @@ void receiveEvent(int numBytes) {
 }
 
 
-// ── LED 更新 ──────────────────────────────────────────────────────────────────
+// LED update function - applies room status and brightness to all LED pairs
 void updateLEDs(uint8_t status, int brightness) {
   for (int i = 0; i < NUM_ROOMS; i++) {
     bool booked = (status >> i) & 0x01;
@@ -90,10 +96,10 @@ void updateLEDs(uint8_t status, int brightness) {
       digitalWrite(LED_PINS[i][1], LOW);
       analogWrite (LED_PINS[i][0], 0);
     } else {
-      // 红色引脚均为非PWM脚（D2 D4 D7 D8 D11），必须用 digitalWrite
-      // 绿色引脚均为PWM脚（D3 D5 D6 D9 D10），用 analogWrite 实现调光
-      digitalWrite(LED_PINS[i][1], booked  ? HIGH : LOW);        // 红
-      analogWrite (LED_PINS[i][0], booked  ? 0    : brightness); // 绿
+      // Red pins (D2 D4 D7 D8 D11) are non-PWM; use digitalWrite HIGH/LOW only.
+      // Green pins (D3 D5 D6 D9 D10) are PWM; use analogWrite for brightness dimming.
+      digitalWrite(LED_PINS[i][1], booked  ? HIGH : LOW);        // red
+      analogWrite (LED_PINS[i][0], booked  ? 0    : brightness); // green
     }
   }
 }
@@ -104,11 +110,11 @@ void setup() {
   Wire.onReceive(receiveEvent);
 
   for (int i = 0; i < NUM_ROOMS; i++) {
-    pinMode(LED_PINS[i][0], OUTPUT);   // 绿
-    pinMode(LED_PINS[i][1], OUTPUT);   // 红
+    pinMode(LED_PINS[i][0], OUTPUT);   // green
+    pinMode(LED_PINS[i][1], OUTPUT);   // red
   }
 
-  // 启动时全部绿灯（默认可用）
+  // All green at startup (default: all rooms assumed available)
   updateLEDs(0x00, 200);
 }
 
