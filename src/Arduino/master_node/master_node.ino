@@ -85,11 +85,15 @@ const int SERVER_PORT = 443;                          // HTTPS via Tailscale Fun
 #define ECHO_PIN   7   // HC-SR04 echo
 #define BUZZER_PIN 8
 
-// ── Backlight / proximity ─────────────────────────────────────────────────────
-#define BL_BRIGHT          255   // full brightness (someone nearby)
-#define BL_DIM              30   // dim brightness  (nobody nearby)
-#define PRESENCE_DIST_CM   100   // threshold: ≤ 100 cm → full brightness
-#define DIST_CHECK_MS      200   // how often to poll the sensor (ms)
+// ── Backlight / proximity / activity ─────────────────────────────────────────
+#define BL_FULL             255  // active brightness
+#define BL_DIM               40  // idle dim level
+#define BL_OFF                0  // screen off
+#define BL_FADE_START_MS  10000UL  // idle 10 s → begin smooth fade
+#define BL_FADE_END_MS    13000UL  // idle 13 s → fully dimmed (3-s fade window)
+#define BL_OFF_MS         30000UL  // idle 30 s → screen off completely
+#define PRESENCE_DIST_CM    100  // ≤ 100 cm counts as "someone present"
+#define DIST_CHECK_MS       200  // HC-SR04 poll interval (ms)
 
 // ── TFT object ───────────────────────────────────────────────────────────────
 // Touch is handled by TFT_eSPI's built-in XPT2046 driver (no separate library).
@@ -187,8 +191,9 @@ char cachedSlots[5][8][9];
 bool slotCached[5][8];     // zero-initialised (all false) by default
 
 // ── Backlight state ───────────────────────────────────────────────────────────
-int  currentBL      = BL_BRIGHT;
-unsigned long lastDistCheck = 0;
+int           currentBL     = BL_FULL;
+unsigned long lastActiveTime = 0;   // last time activity was detected
+unsigned long lastDistCheck  = 0;
 
 // ── Button debounce ───────────────────────────────────────────────────────────
 unsigned long btnTime[3] = {0, 0, 0};
@@ -234,7 +239,8 @@ void buzzerUpdate()
   }
 }
 
-// ── HC-SR04 proximity → backlight ─────────────────────────────────────────────
+// ── HC-SR04 proximity + activity-based backlight ──────────────────────────────
+
 long readDistanceCm() {
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
@@ -242,22 +248,51 @@ long readDistanceCm() {
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
   long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30 ms timeout
-  if (duration == 0) return 999;                  // out of range → treat as no one
+  if (duration == 0) return 999;                  // out of range → no one present
   return duration / 58L;
 }
 
+// Call whenever user activity is detected (button, touch, or proximity).
+// Immediately restores full brightness and resets the idle timer.
+void markActive() {
+  lastActiveTime = millis();
+  if (currentBL != BL_FULL) {
+    currentBL = BL_FULL;
+    analogWrite(TFT_BL_PIN, BL_FULL);
+    Serial.println(F("[BL] wake → full brightness"));
+  }
+}
+
+// Compute brightness from idle time and apply via PWM.
+// Timeline:
+//   0–10 s  : BL_FULL (255)
+//   10–13 s : smooth fade from BL_FULL → BL_DIM  (3-second linear ramp)
+//   13–30 s : BL_DIM  (40)  — dim but readable
+//   30 s+   : BL_OFF  (0)   — screen off
 void updateBacklight() {
   unsigned long now = millis();
-  if (now - lastDistCheck < DIST_CHECK_MS) return;
-  lastDistCheck = now;
 
-  long dist   = readDistanceCm();
-  int  target = (dist <= PRESENCE_DIST_CM) ? BL_BRIGHT : BL_DIM;
+  // Poll distance sensor at DIST_CHECK_MS interval
+  if (now - lastDistCheck >= DIST_CHECK_MS) {
+    lastDistCheck = now;
+    if (readDistanceCm() <= PRESENCE_DIST_CM) {
+      markActive();
+      return;
+    }
+  }
+
+  unsigned long idle = now - lastActiveTime;
+  int target;
+  if      (idle < BL_FADE_START_MS) target = BL_FULL;
+  else if (idle < BL_FADE_END_MS)   target = map(idle,
+                                                  BL_FADE_START_MS, BL_FADE_END_MS,
+                                                  BL_FULL, BL_DIM);
+  else if (idle < BL_OFF_MS)        target = BL_DIM;
+  else                               target = BL_OFF;
+
   if (target != currentBL) {
     currentBL = target;
     analogWrite(TFT_BL_PIN, currentBL);
-    Serial.print(F("[BL] dist=")); Serial.print(dist);
-    Serial.print(F("cm  brightness=")); Serial.println(currentBL);
   }
 }
 
@@ -591,6 +626,13 @@ void handleTouch()
 
   if (!isTouched) return;
 
+  // Any touch counts as user activity — wake/reset backlight timer.
+  // If the screen was completely off, just wake it up without processing
+  // the tap as a booking action (user didn't know what they were tapping).
+  bool wasOff = (currentBL == BL_OFF);
+  markActive();
+  if (wasOff) { touchMustRelease = true; return; }
+
   unsigned long now = millis();
   if (now - lastTouchTime < TOUCH_COOLDOWN)
     return;
@@ -833,7 +875,8 @@ void setup()
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   pinMode(TFT_BL_PIN, OUTPUT);
-  analogWrite(TFT_BL_PIN, BL_BRIGHT);  // full brightness at startup
+  analogWrite(TFT_BL_PIN, BL_FULL);    // full brightness at startup
+  lastActiveTime = millis();            // treat boot as activity
 
   // TFT – pin mapping is in User_Setup.h
   tft.init();
@@ -915,6 +958,7 @@ void loop()
   // BTN1 – advance to next time slot
   if (btnPressed(BTN1, 0))
   {
+    markActive();
     Serial.print(F("[BTN1/D4] slotIdx: "));
     Serial.print(slotIdx); Serial.print(F(" -> "));
     slotIdx = (slotIdx + 1) % NUM_SLOTS;
@@ -929,6 +973,7 @@ void loop()
   // BTN2 – manual refresh  (non-blocking: call /refresh, wait 3 s, re-fetch)
   if (btnPressed(BTN2, 1) && !pendingRefresh)
   {
+    markActive();
     dispState = DISP_NORMAL;
     pendingRefresh = true;
     refreshStart = now;
@@ -948,6 +993,7 @@ void loop()
   // BTN3 – advance to next available date
   if (btnPressed(BTN3, 2) && numDates > 0)
   {
+    markActive();
     Serial.print(F("[BTN3/D6] dateIdx: "));
     Serial.print(dateIdx); Serial.print(F(" -> "));
     dateIdx = (dateIdx + 1) % numDates;
