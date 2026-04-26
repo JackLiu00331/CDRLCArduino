@@ -18,7 +18,7 @@
     Master (this board) : no address – Wire.begin() with no arg
     0x08  Arduino 2     : DHT11 sensor – requestFrom(0x08, 4)
     0x09  Arduino 3     : Wing A LEDs  (rooms 2432 2434 2436 2438 2440)
-    0x0A  Arduino 4                                                                           : Wing B LEDs  (rooms 2426 2428 2430)
+    0x0A  Arduino 4     : Wing B LEDs  (rooms 2426 2428 2430)
 
   Pin assignments:
     D2   HC-SR04 Trig  (proximity sensor – screen auto-dim)
