@@ -81,8 +81,8 @@
 #include <qrcode.h>
 
 // WiFi and server connection settings
-const char *SSID = "NETGEAR77";                        // ← change to your WiFi SSID
-const char *PASSWORD = "pinkbutter932";                // ← change to your WiFi password
+const char *SSID = "Chao";                        // ← change to your WiFi SSID
+const char *PASSWORD = "88888888";                // ← change to your WiFi password
 const char *SERVER_IP = "zz-cloud.tail6b9dfa.ts.net"; // ← Tailscale Funnel hostname
 const int SERVER_PORT = 443;                          // HTTPS via Tailscale Funnel
 
@@ -108,7 +108,7 @@ const int SERVER_PORT = 443;                          // HTTPS via Tailscale Fun
 #define BL_FADE_START_MS  10000UL  // idle 10 s → begin smooth fade
 #define BL_FADE_END_MS    13000UL  // idle 13 s → fully dimmed (3-s fade window)
 #define BL_OFF_MS         30000UL  // idle 30 s → screen off completely
-#define PRESENCE_DIST_CM    100  // ≤ 100 cm counts as "someone present"
+#define PRESENCE_DIST_CM    1  // ≤ 100 cm counts as "someone present"
 #define DIST_CHECK_MS       200  // HC-SR04 poll interval (ms)
 
 // TFT display object.
@@ -744,13 +744,13 @@ void fetchDates()
     start = comma + 1;
   }
   // Pick the default date:
-  //   Mon–Thu (NTP day 1–4): today is dateList[0] but is all-blocked by Google;
-  //                           default to index 1 (tomorrow).
+  //   Mon     (NTP day 1): today is dateList[0]; default to index 0 (today = Monday).
+  //   Tue–Thu (NTP day 2–4): today is dateList[0] but is largely filled; default to index 1 (tomorrow).
   //   Fri–Sun (NTP day 5,6,0): today is NOT in the list; the list starts from
   //                             next Monday, so index 0 is already the best default.
   // timeClient.getDay() → 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat
   int dow = timeClient.getDay();
-  bool todayInList = (dow >= 1 && dow <= 4);   // Mon–Thu
+  bool todayInList = (dow >= 2 && dow <= 4);   // Tue–Thu: default to tomorrow; Mon stays at idx 0 (today)
   dateIdx = (numDates > 1 && todayInList) ? 1 : 0;
 
   Serial.print(F("[Dates] got ")); Serial.print(numDates);
